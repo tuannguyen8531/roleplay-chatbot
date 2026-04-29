@@ -1,31 +1,129 @@
 """
-Entry Node — The first node in the graph.
+Entry Node — Prepares context before calling the LLM.
 
-Phase 1: Simply passes through (character prompt is set at invocation time).
-Phase 2: Trims message history to stay within context window limits.
+Responsibilities:
+1. Load long-term facts from MongoDB
+2. Summarize old messages when conversation exceeds threshold
+3. Trim message history to stay within context window
 """
 
-from langchain_core.messages import HumanMessage, AIMessage, SystemMessage
+from langchain_core.messages import HumanMessage, AIMessage, SystemMessage, RemoveMessage
+from langchain_ollama import ChatOllama
 
 from app.config import config
 from app.models.state import RoleplayState
+from app.memory.facts_store import load_facts
+from app.logger import log_ai_call
+
+# Module-level mongo_client — set by main.py at startup
+_mongo_client = None
+
+
+def set_mongo_client(client):
+    """Set the MongoDB client for facts loading. Called once at startup."""
+    global _mongo_client
+    _mongo_client = client
+
+
+def _get_summary_llm() -> ChatOllama:
+    """Get a low-temperature LLM for summarization (factual, not creative)."""
+    return ChatOllama(
+        model=config.ollama_model,
+        base_url=config.ollama_base_url,
+        temperature=0.3,  # Low temp for accurate summarization
+        num_ctx=config.ollama_num_ctx,
+    )
+
+
+def _summarize_messages(messages: list, existing_summary: str) -> str:
+    """
+    Summarize old messages into a concise paragraph.
+
+    If there's an existing summary, incorporates it into the new summary.
+    """
+    llm = _get_summary_llm()
+
+    # Format messages for summarization
+    conversation_text = ""
+    for msg in messages:
+        role = "User" if msg.type == "human" else "Character"
+        conversation_text += f"{role}: {msg.content}\n"
+
+    # Build summarization prompt
+    if existing_summary:
+        prompt = f"""You are a concise summarizer. Combine the existing summary with the new conversation below into a single, updated summary.
+
+Existing summary:
+{existing_summary}
+
+New conversation to incorporate:
+{conversation_text}
+
+Write a concise summary (3-5 sentences max) capturing the key events, decisions, and character interactions. Focus on plot-relevant details. Do not include any preamble."""
+    else:
+        prompt = f"""You are a concise summarizer. Summarize the following roleplay conversation.
+
+{conversation_text}
+
+Write a concise summary (3-5 sentences max) capturing the key events, decisions, and character interactions. Focus on plot-relevant details. Do not include any preamble."""
+
+    log_ai_call(
+        "summarize",
+        existing_summary=existing_summary,
+        messages_to_summarize=len(messages),
+        prompt=prompt,
+    )
+
+    response = llm.invoke([HumanMessage(content=prompt)])
+    summary = response.content.strip()
+
+    log_ai_call(
+        "summarize",
+        summary=summary,
+    )
+
+    return summary
 
 
 def entry_node(state: RoleplayState) -> dict:
     """
     Prepare context before calling the LLM.
 
-    Phase 2: Trims messages to keep conversation within context window.
-    Keeps the most recent N messages (configured via max_history_messages).
+    1. Loads long-term facts from MongoDB
+    2. If messages exceed threshold: summarize old ones, then trim
+    3. Increments turn counter
     """
+    updates: dict = {}
     messages = state["messages"]
     max_messages = config.max_history_messages
+    current_summary = state.get("conversation_summary", "")
+    turn_count = state.get("turn_count", 0)
 
-    # If within limits, nothing to do
-    if len(messages) <= max_messages:
-        return {}
+    # 1. Load long-term facts
+    if _mongo_client is not None:
+        facts = load_facts(
+            _mongo_client,
+            character_name=state["character_name"],
+        )
+        updates["long_term_facts"] = facts
 
-    # Trim: keep only the last N messages
-    trimmed = messages[-max_messages:]
+    # 2. Summarize + trim if over threshold
+    if len(messages) > max_messages:
+        # Keep half the threshold — creates buffer before next trigger
+        keep_count = max_messages // 2
 
-    return {"messages": trimmed}
+        # Messages to summarize (the old ones we're about to remove)
+        messages_to_remove = messages[:-keep_count]
+
+        # Generate summary from old messages
+        new_summary = _summarize_messages(messages_to_remove, current_summary)
+        updates["conversation_summary"] = new_summary
+
+        # Use RemoveMessage to explicitly delete old messages from state
+        # (add_messages reducer ignores simple list replacement — must use RemoveMessage)
+        updates["messages"] = [RemoveMessage(id=m.id) for m in messages_to_remove]
+
+    # 3. Increment turn count
+    updates["turn_count"] = turn_count + 1
+
+    return updates

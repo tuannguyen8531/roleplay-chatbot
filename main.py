@@ -279,6 +279,13 @@ def main():
         # Verify connection is alive
         mongo_client.admin.command("ping")
         checkpointer = MongoDBSaver(mongo_client, db_name=config.mongodb_db_name)
+
+        # Share mongo_client with graph nodes that need it
+        from app.graph.nodes.entry import set_mongo_client as entry_set_mongo
+        from app.graph.nodes.diary import set_mongo_client as diary_set_mongo
+        entry_set_mongo(mongo_client)
+        diary_set_mongo(mongo_client)
+
         print(f"{GREEN}✓ MongoDB connected. DB: {config.mongodb_db_name}{RESET}")
     except Exception as e:
         print(f"{RED}✗ Cannot connect to MongoDB: {e}{RESET}")

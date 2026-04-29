@@ -37,6 +37,7 @@ class Config:
 
     # Chat settings
     max_history_messages: int = 20  # Keep last N messages before trimming
+    diary_interval: int = 5  # Run diary extraction every N turns
     streaming: bool = True  # Stream responses token-by-token
 
     @classmethod
@@ -58,6 +59,9 @@ class Config:
             mongodb_db_name=os.getenv("MONGODB_DB_NAME", cls.mongodb_db_name),
             max_history_messages=int(
                 os.getenv("MAX_HISTORY_MESSAGES", str(cls.max_history_messages))
+            ),
+            diary_interval=int(
+                os.getenv("DIARY_INTERVAL", str(cls.diary_interval))
             ),
             streaming=os.getenv("STREAMING", "true").lower() == "true",
         )

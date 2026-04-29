@@ -16,18 +16,15 @@ class RoleplayState(MessagesState):
 
     Extends MessagesState which provides:
     - messages: list of chat messages with auto-append reducer
-
-    Phase 1 fields:
-    - character_name: Name of the active character
-    - character_prompt: Full system prompt built from character profile
-
-    Future phases will add:
-    - conversation_summary: str  (Phase 2 — trimmed history summary)
-    - long_term_facts: list[str] (Phase 2 — cross-session facts)
-    - intent: str                (Phase 3 — router classification)
-    - retrieved_context: str     (Phase 3 — RAG results)
-    - tool_results: str          (Phase 3 — tool execution output)
     """
 
+    # Character
     character_name: str
     character_prompt: str
+
+    # Memory
+    conversation_summary: str  # Summary of trimmed old messages
+    long_term_facts: list[str]  # Facts loaded from DB for this user
+
+    # Counters
+    turn_count: int  # Track turns for diary trigger
