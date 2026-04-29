@@ -1,0 +1,39 @@
+graph TD
+    classDef api fill:#B3E5FC,stroke:#01579B,stroke-width:2px,color:#000;
+    classDef storage fill:#C8E6C9,stroke:#1B5E20,stroke-width:2px,color:#000;
+    classDef rag fill:#BBDEFB,stroke:#1565C0,stroke-width:1px,color:#000;
+    classDef tool fill:#D1C4E9,stroke:#311B92,stroke-width:1px,color:#000;
+    classDef bgNode fill:#FFE0B2,stroke:#E65100,stroke-width:2px,stroke-dasharray: 5 5,color:#000;
+    classDef bgStorage fill:#FFCCBC,stroke:#BF360C,stroke-width:2px,color:#000;
+
+    User((User)) -- "Send Message" --> API[FastAPI Gateway]
+    
+    API -- "Fetch Diary & State" --> Postgres[(Postgres Memory)]
+    Postgres -- "Load Context" --> EntryNode[Node: Entry & Pre-process]
+
+    subgraph LangGraph [LangGraph Orchestrator]
+        direction TB
+        EntryNode --> Router{Intent Router}
+
+        Router -- "Needs Knowledge" --> RAGNode[Node: Retrieval - Qdrant]
+        RAGNode --> Grader{Data Grader}
+        Grader -- "Bad Data" --> Rewrite[Node: Query Rewrite]
+        Rewrite --> RAGNode
+        Grader -- "Good Data" --> GenNode[Node: Generate Response]
+
+        Router -- "Action/Chat" --> ToolNode[Node: Tool Execution]
+        ToolNode --> GenNode
+    end
+
+    GenNode -- "Response" --> API
+    API -- "Display" --> User
+
+    GenNode -.->|Analysis| DiaryNode[Node: Diary & Insight Extraction]
+    DiaryNode -.->|Update| DB_Update[(Postgres Diary)]
+
+    class API api;
+    class Postgres,VDB storage;
+    class RAGNode,Rewrite,GenNode,EntryNode rag;
+    class ToolNode tool;
+    class DiaryNode bgNode;
+    class DB_Update bgStorage;
