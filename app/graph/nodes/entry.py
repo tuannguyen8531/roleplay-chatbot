@@ -26,46 +26,58 @@ def set_mongo_client(client):
 
 
 def _get_summary_llm() -> ChatOllama:
-    """Get a low-temperature LLM for summarization (factual, not creative)."""
+    """Get a low-temperature LLM for summarization (factual, not creative).
+    Uses utility_model if configured for faster processing."""
     return ChatOllama(
-        model=config.ollama_model,
+        model=config.utility_model,
         base_url=config.ollama_base_url,
         temperature=0.3,  # Low temp for accurate summarization
         num_ctx=config.ollama_num_ctx,
     )
 
 
-def _summarize_messages(messages: list, existing_summary: str) -> str:
+def _summarize_messages(messages: list, existing_summary: str, character_name: str) -> str:
     """
     Summarize old messages into a concise paragraph.
 
     If there's an existing summary, incorporates it into the new summary.
+    Includes character name for context-aware summarization.
     """
     llm = _get_summary_llm()
 
     # Format messages for summarization
     conversation_text = ""
     for msg in messages:
-        role = "User" if msg.type == "human" else "Character"
+        role = "User" if msg.type == "human" else character_name
         conversation_text += f"{role}: {msg.content}\n"
 
     # Build summarization prompt
     if existing_summary:
-        prompt = f"""You are a concise summarizer. Combine the existing summary with the new conversation below into a single, updated summary.
+        prompt = f"""Summarize the roleplay conversation between User and {character_name}. Merge the existing summary with new events.
 
 Existing summary:
 {existing_summary}
 
-New conversation to incorporate:
+New conversation:
 {conversation_text}
 
-Write a concise summary (3-5 sentences max) capturing the key events, decisions, and character interactions. Focus on plot-relevant details. Do not include any preamble."""
+Rules:
+- Write 3-5 sentences max
+- Focus on: plot events, decisions made, relationship changes, locations visited
+- Use character name "{character_name}" (not "Character")
+- Keep track of user's in-character name if revealed
+- No preamble, just the summary"""
     else:
-        prompt = f"""You are a concise summarizer. Summarize the following roleplay conversation.
+        prompt = f"""Summarize this roleplay conversation between User and {character_name}.
 
 {conversation_text}
 
-Write a concise summary (3-5 sentences max) capturing the key events, decisions, and character interactions. Focus on plot-relevant details. Do not include any preamble."""
+Rules:
+- Write 3-5 sentences max
+- Focus on: plot events, decisions made, relationship changes, locations visited
+- Use character name "{character_name}" (not "Character")
+- Keep track of user's in-character name if revealed
+- No preamble, just the summary"""
 
     log_ai_call(
         "summarize",
@@ -116,7 +128,9 @@ def entry_node(state: RoleplayState) -> dict:
         messages_to_remove = messages[:-keep_count]
 
         # Generate summary from old messages
-        new_summary = _summarize_messages(messages_to_remove, current_summary)
+        new_summary = _summarize_messages(
+            messages_to_remove, current_summary, state["character_name"]
+        )
         updates["conversation_summary"] = new_summary
 
         # Use RemoveMessage to explicitly delete old messages from state

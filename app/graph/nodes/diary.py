@@ -24,9 +24,10 @@ def set_mongo_client(client):
 
 
 def _get_extraction_llm() -> ChatOllama:
-    """Get a low-temperature LLM for fact extraction."""
+    """Get a low-temperature LLM for fact extraction.
+    Uses utility_model if configured for faster processing."""
     return ChatOllama(
-        model=config.ollama_model,
+        model=config.utility_model,
         base_url=config.ollama_base_url,
         temperature=0.2,  # Very low for factual extraction
         num_ctx=config.ollama_num_ctx,
@@ -66,40 +67,47 @@ def diary_node(state: RoleplayState) -> dict:
     existing_facts = state.get("long_term_facts", [])
     existing_facts_text = ""
     if existing_facts:
-        existing_facts_text = "\nAlready known facts (DO NOT repeat these):\n"
+        existing_facts_text = "\nAlready known facts (DO NOT repeat or rephrase these):\n"
         existing_facts_text += "\n".join(f"- {f}" for f in existing_facts)
         existing_facts_text += "\n"
 
     # Format recent messages
     recent = messages[-10:]  # Last 5 exchanges
+    character_name = state["character_name"]
     conversation_text = ""
     for msg in recent:
-        role = "User" if msg.type == "human" else state["character_name"]
+        role = "User" if msg.type == "human" else character_name
         conversation_text += f"{role}: {msg.content}\n"
 
-    # Extract facts
-    prompt = f"""Analyze this roleplay conversation and extract NEW important facts about the User (NOT the character).
+    # Extract facts with improved prompt + few-shot examples
+    prompt = f"""Extract NEW important facts from this roleplay conversation. Focus on the User (the human player), not {character_name}.
 
+Conversation:
 {conversation_text}
 {existing_facts_text}
-Extract facts in these categories:
-- User preferences (what they like/dislike in the story)
-- Important decisions the user made
-- Things the user revealed about themselves
-- Key plot events that happened
+Good facts (specific, actionable):
+- User's character name is "Zen von Pendragon"
+- User chose to enter the cave instead of the forest
+- User prefers diplomatic solutions over combat
+- User revealed they are searching for a lost artifact
+
+Bad facts (vague, negative, or obvious — do NOT write these):
+- "User did not reveal anything" (negative/empty)
+- "User is chatting with {character_name}" (obvious)
+- "User responded to a question" (trivial)
 
 Rules:
-- Only extract CLEAR facts, not assumptions
-- Each fact should be one short sentence
-- Do NOT repeat any already known facts listed above
-- If no NEW facts, respond with exactly "NONE"
+- Only write CONCRETE, SPECIFIC facts
+- Each fact = one short sentence
+- Skip if nothing meaningful happened
 - Maximum 5 facts
+- If no new facts, respond with exactly "NONE"
 
 Respond with only the facts, one per line, no numbering or bullets."""
 
     log_ai_call(
         "diary",
-        character=state["character_name"],
+        character=character_name,
         messages_analyzed=len(recent),
         existing_facts=existing_facts,
         prompt=prompt,
@@ -112,12 +120,21 @@ Respond with only the facts, one per line, no numbering or bullets."""
         log_ai_call("diary", facts=[])
         return {}
 
-    # Parse facts — filter out NONE lines and empty lines
-    new_facts = [
-        line.strip()
-        for line in content.split("\n")
-        if line.strip() and line.strip().upper() != "NONE"
+    # Parse facts — filter out NONE lines, empty lines, and negative/vague facts
+    new_facts = []
+    negative_phrases = [
+        "did not reveal", "did not state", "did not mention",
+        "no information", "not reveal", "not explicitly",
+        "did not express", "no clear",
     ]
+    for line in content.split("\n"):
+        fact = line.strip().lstrip("•-· ").strip()
+        if not fact or fact.upper() == "NONE":
+            continue
+        # Filter out negative/vague facts
+        if any(phrase in fact.lower() for phrase in negative_phrases):
+            continue
+        new_facts.append(fact)
 
     if not new_facts:
         log_ai_call("diary", facts=[])
@@ -132,7 +149,7 @@ Respond with only the facts, one per line, no numbering or bullets."""
     save_facts(
         _mongo_client,
         facts=new_facts,
-        character_name=state["character_name"],
+        character_name=character_name,
     )
 
     return {}

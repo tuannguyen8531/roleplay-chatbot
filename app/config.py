@@ -20,8 +20,14 @@ class Config:
     # Ollama settings
     ollama_base_url: str = "http://localhost:11434"
     ollama_model: str = "llama3.2:3b"
+    ollama_utility_model: str = ""  # Smaller model for summary/diary (empty = use main model)
     ollama_temperature: float = 0.8
     ollama_num_ctx: int = 8192  # Context window size
+
+    @property
+    def utility_model(self) -> str:
+        """Model used for summarization and diary (falls back to main model)."""
+        return self.ollama_utility_model or self.ollama_model
 
     # MongoDB settings
     mongodb_user: str = "chatbot"
@@ -46,6 +52,7 @@ class Config:
         return cls(
             ollama_base_url=os.getenv("OLLAMA_BASE_URL", cls.ollama_base_url),
             ollama_model=os.getenv("OLLAMA_MODEL", cls.ollama_model),
+            ollama_utility_model=os.getenv("OLLAMA_UTILITY_MODEL", cls.ollama_utility_model),
             ollama_temperature=float(
                 os.getenv("OLLAMA_TEMPERATURE", str(cls.ollama_temperature))
             ),
