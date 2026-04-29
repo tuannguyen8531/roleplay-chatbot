@@ -1,10 +1,11 @@
 [project]
 name = "ai-local-research"
 version = "0.1.0"
-description = "Add your description here"
+description = "Local AI-powered roleplay chatbot using Ollama and LangGraph"
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
+    "httpx",
     "langchain-core>=1.2.28",
     "langchain-ollama>=1.1.0",
     "langgraph>=1.1.6",

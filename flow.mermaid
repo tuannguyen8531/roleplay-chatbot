@@ -1,39 +1,30 @@
 graph TD
-    classDef api fill:#B3E5FC,stroke:#01579B,stroke-width:2px,color:#000;
+    classDef repl fill:#B3E5FC,stroke:#01579B,stroke-width:2px,color:#000;
     classDef storage fill:#C8E6C9,stroke:#1B5E20,stroke-width:2px,color:#000;
-    classDef rag fill:#BBDEFB,stroke:#1565C0,stroke-width:1px,color:#000;
-    classDef tool fill:#D1C4E9,stroke:#311B92,stroke-width:1px,color:#000;
-    classDef bgNode fill:#FFE0B2,stroke:#E65100,stroke-width:2px,stroke-dasharray: 5 5,color:#000;
-    classDef bgStorage fill:#FFCCBC,stroke:#BF360C,stroke-width:2px,color:#000;
+    classDef node fill:#BBDEFB,stroke:#1565C0,stroke-width:1px,color:#000;
+    classDef user fill:#FFE0B2,stroke:#E65100,stroke-width:2px,color:#000;
+    classDef llm fill:#D1C4E9,stroke:#311B92,stroke-width:1px,color:#000;
 
-    User((User)) -- "Send Message" --> API[FastAPI Gateway]
-    
-    API -- "Fetch Diary & State" --> Postgres[(Postgres Memory)]
-    Postgres -- "Load Context" --> EntryNode[Node: Entry & Pre-process]
+    User((User)) -- "Terminal Input" --> REPL[Terminal REPL]
 
     subgraph LangGraph [LangGraph Orchestrator]
         direction TB
-        EntryNode --> Router{Intent Router}
-
-        Router -- "Needs Knowledge" --> RAGNode[Node: Retrieval - Qdrant]
-        RAGNode --> Grader{Data Grader}
-        Grader -- "Bad Data" --> Rewrite[Node: Query Rewrite]
-        Rewrite --> RAGNode
-        Grader -- "Good Data" --> GenNode[Node: Generate Response]
-
-        Router -- "Action/Chat" --> ToolNode[Node: Tool Execution]
-        ToolNode --> GenNode
+        EntryNode[Node: Entry<br/>load facts, summarize, trim]
+        GenerateNode[Node: Generate<br/>call Ollama]
     end
 
-    GenNode -- "Response" --> API
-    API -- "Display" --> User
+    REPL -- "Invoke" --> EntryNode
+    GenerateNode -- "Response" --> REPL
 
-    GenNode -.->|Analysis| DiaryNode[Node: Diary & Insight Extraction]
-    DiaryNode -.->|Update| DB_Update[(Postgres Diary)]
+    EntryNode -.->|read / write state| MongoDB[(MongoDB<br/>Checkpoints)]
+    GenerateNode -.->|invoke| Ollama[Ollama LLM]
 
-    class API api;
-    class Postgres,VDB storage;
-    class RAGNode,Rewrite,GenNode,EntryNode rag;
-    class ToolNode tool;
-    class DiaryNode bgNode;
-    class DB_Update bgStorage;
+    REPL -.->|every N turns| Diary[Background Diary<br/>extract facts]
+    Diary -.->|update| MongoDB2[(MongoDB<br/>User Facts)]
+    Diary -.->|summarize| Ollama
+
+    class REPL repl;
+    class MongoDB,MongoDB2 storage;
+    class EntryNode,GenerateNode,Diary node;
+    class User user;
+    class Ollama llm;

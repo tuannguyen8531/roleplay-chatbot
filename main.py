@@ -5,16 +5,21 @@ A local AI-powered roleplay chatbot using Ollama + LangGraph.
 Run: uv run python main.py
 """
 
+import atexit
+import logging
 import sys
 import threading
 import uuid
+from concurrent.futures import ThreadPoolExecutor
 
+import httpx
 from langchain_core.messages import HumanMessage
 from langgraph.checkpoint.mongodb import MongoDBSaver
 from pymongo import MongoClient
 
 from app.config import config
 from app.graph.builder import build_graph
+from app.graph.nodes.diary import diary_node, should_run_diary
 from app.models.character import Character, get_character, list_characters
 
 # ── ANSI Colors ──────────────────────────────────────────────────────────────
@@ -166,7 +171,7 @@ def select_thread(character: Character, mongo_client: MongoClient) -> str | None
         print(f"{RED}Invalid choice.{RESET}")
 
 
-def run_chat(character: Character, checkpointer: MongoDBSaver, thread_id: str):
+def run_chat(character: Character, checkpointer: MongoDBSaver, thread_id: str, diary_executor: ThreadPoolExecutor | None = None):
     """
     Main chat loop for a single character session.
 
@@ -241,11 +246,29 @@ def run_chat(character: Character, checkpointer: MongoDBSaver, thread_id: str):
             ai_message = result["messages"][-1]
             print(f"{GREEN}{BOLD}{character.name}:{RESET} {ai_message.content}")
 
+            # Trigger diary extraction asynchronously after response is shown
+            if diary_executor is not None and should_run_diary(result) == "diary":
+                state_snapshot = {
+                    "messages": list(result.get("messages", [])),
+                    "character_name": result.get("character_name", ""),
+                    "long_term_facts": list(result.get("long_term_facts", [])),
+                    "turn_count": result.get("turn_count", 0),
+                }
+                diary_executor.submit(_run_diary_safe, state_snapshot)
+
         except Exception as e:
             print(f"\n{RED}Error: {e}{RESET}")
             print(f"{DIM}Make sure Ollama is running: ollama serve{RESET}")
 
         print()
+
+
+def _run_diary_safe(state_snapshot: dict):
+    """Safely run diary extraction in a background thread."""
+    try:
+        diary_node(state_snapshot)
+    except Exception:
+        logging.getLogger("diary").exception("Background diary extraction failed")
 
 
 def main():
@@ -255,7 +278,6 @@ def main():
     # Check if Ollama is reachable
     print(f"{DIM}Connecting to Ollama at {config.ollama_base_url}...{RESET}")
     try:
-        import httpx
         resp = httpx.get(f"{config.ollama_base_url}/api/tags", timeout=5)
         models = [m["name"] for m in resp.json().get("models", [])]
         if models:
@@ -267,9 +289,15 @@ def main():
         if not any(config.ollama_model in m for m in models):
             print(f"{YELLOW}⚠ Model '{config.ollama_model}' not found. Run: ollama pull {config.ollama_model}{RESET}")
             sys.exit(1)
-    except Exception:
+    except httpx.ConnectError:
         print(f"{RED}✗ Cannot connect to Ollama. Make sure it's running:{RESET}")
         print(f"  {DIM}ollama serve{RESET}")
+        sys.exit(1)
+    except httpx.TimeoutException:
+        print(f"{RED}✗ Ollama connection timed out.{RESET}")
+        sys.exit(1)
+    except Exception as e:
+        print(f"{RED}✗ Unexpected error connecting to Ollama: {e}{RESET}")
         sys.exit(1)
 
     # Connect to MongoDB
@@ -294,6 +322,15 @@ def main():
 
     print()
 
+    # Thread pool for background diary tasks
+    diary_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="diary")
+
+    def _shutdown_diary():
+        print(f"\n{DIM}Waiting for background tasks...{RESET}")
+        diary_executor.shutdown(wait=True)
+
+    atexit.register(_shutdown_diary)
+
     # Main loop: select character → chat → repeat
     while True:
         character = select_character()
@@ -303,7 +340,7 @@ def main():
         existing_thread = select_thread(character, mongo_client)
         thread_id = existing_thread or f"{character.name.lower()}-{uuid.uuid4().hex[:8]}"
 
-        result = run_chat(character, checkpointer, thread_id)
+        result = run_chat(character, checkpointer, thread_id, diary_executor)
 
         if result == "quit":
             break

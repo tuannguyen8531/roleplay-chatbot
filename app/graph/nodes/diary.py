@@ -10,7 +10,7 @@ from langchain_ollama import ChatOllama
 
 from app.config import config
 from app.models.state import RoleplayState
-from app.memory.facts_store import save_facts
+from app.memory.facts_store import load_facts, save_facts
 from app.logger import log_ai_call
 
 # Module-level mongo_client — set by main.py at startup
@@ -63,8 +63,11 @@ def diary_node(state: RoleplayState) -> dict:
 
     llm = _get_extraction_llm()
 
-    # Load existing facts so LLM knows what's already recorded
-    existing_facts = state.get("long_term_facts", [])
+    # Reload freshest facts from DB to avoid duplicates from concurrent/background runs
+    existing_facts = load_facts(
+        _mongo_client,
+        character_name=state["character_name"],
+    )
     existing_facts_text = ""
     if existing_facts:
         existing_facts_text = "\nAlready known facts (DO NOT repeat or rephrase these):\n"

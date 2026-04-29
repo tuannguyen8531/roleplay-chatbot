@@ -80,4 +80,4 @@ def get_character(name: str) -> Character | None:
 
 def list_characters() -> list[str]:
     """List all available character names."""
-    return list(CHARACTERS.keys())
+    return sorted(CHARACTERS.keys())

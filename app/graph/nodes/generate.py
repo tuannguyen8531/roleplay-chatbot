@@ -15,21 +15,25 @@ from app.models.state import RoleplayState
 from app.models.character import get_character
 from app.logger import log_ai_call
 
-# Initialize LLMs (cached by temperature)
-_llms: dict[float, ChatOllama] = {}
+import threading
+
+# Thread-local cache: each thread gets its own ChatOllama instance
+_llm_local = threading.local()
 
 
 def _get_llm(temperature: float | None = None) -> ChatOllama:
     """Get or create the ChatOllama instance for a specific temperature."""
     t = temperature if temperature is not None else config.ollama_temperature
-    if t not in _llms:
-        _llms[t] = ChatOllama(
+    if not hasattr(_llm_local, "llms"):
+        _llm_local.llms = {}
+    if t not in _llm_local.llms:
+        _llm_local.llms[t] = ChatOllama(
             model=config.ollama_model,
             base_url=config.ollama_base_url,
             temperature=t,
             num_ctx=config.ollama_num_ctx,
         )
-    return _llms[t]
+    return _llm_local.llms[t]
 
 
 def _build_system_prompt(state: RoleplayState) -> str:
