@@ -23,6 +23,7 @@ class Config:
     ollama_utility_model: str = ""  # Smaller model for summary/diary (empty = use main model)
     ollama_temperature: float = 0.8
     ollama_num_ctx: int = 8192  # Context window size
+    ollama_embed_model: str = "nomic-embed-text"  # Embedding model for RAG
 
     @property
     def utility_model(self) -> str:
@@ -41,10 +42,21 @@ class Config:
         """Build MongoDB URI from individual components."""
         return f"mongodb://{self.mongodb_user}:{self.mongodb_password}@{self.mongodb_host}:{self.mongodb_port}"
 
+    # Qdrant settings
+    qdrant_host: str = "localhost"
+    qdrant_port: int = 6333
+
+    @property
+    def qdrant_url(self) -> str:
+        """Build Qdrant URL."""
+        return f"http://{self.qdrant_host}:{self.qdrant_port}"
+
     # Chat settings
     max_history_messages: int = 20  # Keep last N messages before trimming
     diary_interval: int = 5  # Run diary extraction every N turns
     streaming: bool = True  # Stream responses token-by-token
+    rag_score_threshold: float = 0.55  # Minimum cosine similarity for RAG results
+    rag_min_message_length: int = 15  # Min chars for archive indexing
 
     @classmethod
     def from_env(cls) -> "Config":
@@ -59,6 +71,7 @@ class Config:
             ollama_num_ctx=int(
                 os.getenv("OLLAMA_NUM_CTX", str(cls.ollama_num_ctx))
             ),
+            ollama_embed_model=os.getenv("OLLAMA_EMBED_MODEL", cls.ollama_embed_model),
             mongodb_user=os.getenv("MONGODB_USER", cls.mongodb_user),
             mongodb_password=os.getenv("MONGODB_PASSWORD", cls.mongodb_password),
             mongodb_host=os.getenv("MONGODB_HOST", cls.mongodb_host),
@@ -71,6 +84,14 @@ class Config:
                 os.getenv("DIARY_INTERVAL", str(cls.diary_interval))
             ),
             streaming=os.getenv("STREAMING", "true").lower() == "true",
+            qdrant_host=os.getenv("QDRANT_HOST", cls.qdrant_host),
+            qdrant_port=int(os.getenv("QDRANT_PORT", str(cls.qdrant_port))),
+            rag_score_threshold=float(
+                os.getenv("RAG_SCORE_THRESHOLD", str(cls.rag_score_threshold))
+            ),
+            rag_min_message_length=int(
+                os.getenv("RAG_MIN_MESSAGE_LENGTH", str(cls.rag_min_message_length))
+            ),
         )
 
 

@@ -15,9 +15,22 @@ services:
     networks:
       - chatbot
 
+  qdrant:
+    image: qdrant/qdrant:latest
+    container_name: chatbot-qdrant
+    restart: unless-stopped
+    ports:
+      - "${QDRANT_PORT:-6333}:6333"
+      - "${QDRANT_GRPC_PORT:-6334}:6334"
+    volumes:
+      - qdrant_data:/qdrant/storage
+    networks:
+      - chatbot
+
 volumes:
   mongo_data:
   mongo_config:
+  qdrant_data:
 
 networks:
   chatbot:

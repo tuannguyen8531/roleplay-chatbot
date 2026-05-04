@@ -20,6 +20,7 @@ from pymongo import MongoClient
 from app.config import config
 from app.graph.builder import build_graph
 from app.graph.nodes.diary import diary_node, should_run_diary
+from app.memory.conversation_archive import index_exchange
 from app.models.character import Character, get_character, list_characters
 
 # ── ANSI Colors ──────────────────────────────────────────────────────────────
@@ -171,7 +172,13 @@ def select_thread(character: Character, mongo_client: MongoClient) -> str | None
         print(f"{RED}Invalid choice.{RESET}")
 
 
-def run_chat(character: Character, checkpointer: MongoDBSaver, thread_id: str, diary_executor: ThreadPoolExecutor | None = None):
+def run_chat(
+    character: Character,
+    checkpointer: MongoDBSaver,
+    thread_id: str,
+    bg_executor: ThreadPoolExecutor | None = None,
+    qdrant_client=None,
+):
     """
     Main chat loop for a single character session.
 
@@ -246,15 +253,32 @@ def run_chat(character: Character, checkpointer: MongoDBSaver, thread_id: str, d
             ai_message = result["messages"][-1]
             print(f"{GREEN}{BOLD}{character.name}:{RESET} {ai_message.content}")
 
-            # Trigger diary extraction asynchronously after response is shown
-            if diary_executor is not None and should_run_diary(result) == "diary":
-                state_snapshot = {
-                    "messages": list(result.get("messages", [])),
-                    "character_name": result.get("character_name", ""),
-                    "long_term_facts": list(result.get("long_term_facts", [])),
-                    "turn_count": result.get("turn_count", 0),
-                }
-                diary_executor.submit(_run_diary_safe, state_snapshot)
+            # Background tasks after response is shown
+            if bg_executor is not None:
+                # Index the exchange into conversation archive (skip trivial messages)
+                if (
+                    qdrant_client is not None
+                    and len(user_input) >= config.rag_min_message_length
+                    and len(ai_message.content) >= config.rag_min_message_length
+                ):
+                    bg_executor.submit(
+                        _index_exchange_safe,
+                        qdrant_client,
+                        user_input,
+                        ai_message.content,
+                        character.name,
+                        thread_id,
+                    )
+
+                # Trigger diary extraction if due
+                if should_run_diary(result) == "diary":
+                    state_snapshot = {
+                        "messages": list(result.get("messages", [])),
+                        "character_name": result.get("character_name", ""),
+                        "long_term_facts": list(result.get("long_term_facts", [])),
+                        "turn_count": result.get("turn_count", 0),
+                    }
+                    bg_executor.submit(_run_diary_safe, state_snapshot)
 
         except Exception as e:
             print(f"\n{RED}Error: {e}{RESET}")
@@ -269,6 +293,14 @@ def _run_diary_safe(state_snapshot: dict):
         diary_node(state_snapshot)
     except Exception:
         logging.getLogger("diary").exception("Background diary extraction failed")
+
+
+def _index_exchange_safe(client, user_msg: str, ai_msg: str, character_name: str, thread_id: str):
+    """Safely index a conversation exchange in background."""
+    try:
+        index_exchange(client, user_msg, ai_msg, character_name, thread_id)
+    except Exception:
+        logging.getLogger("archive").exception("Background archive indexing failed")
 
 
 def main():
@@ -289,6 +321,11 @@ def main():
         if not any(config.ollama_model in m for m in models):
             print(f"{YELLOW}⚠ Model '{config.ollama_model}' not found. Run: ollama pull {config.ollama_model}{RESET}")
             sys.exit(1)
+
+        # Also check embedding model
+        if not any(config.ollama_embed_model in m for m in models):
+            print(f"{YELLOW}⚠ Embedding model '{config.ollama_embed_model}' not found. Run: ollama pull {config.ollama_embed_model}{RESET}")
+            print(f"  {DIM}Conversation archive will be disabled until the model is available.{RESET}")
     except httpx.ConnectError:
         print(f"{RED}✗ Cannot connect to Ollama. Make sure it's running:{RESET}")
         print(f"  {DIM}ollama serve{RESET}")
@@ -320,16 +357,34 @@ def main():
         print(f"  {DIM}Run: docker compose up -d{RESET}")
         sys.exit(1)
 
+    # Connect to Qdrant
+    print(f"{DIM}Connecting to Qdrant at {config.qdrant_url}...{RESET}")
+    qdrant_client = None
+    try:
+        from qdrant_client import QdrantClient
+        qdrant_client = QdrantClient(url=config.qdrant_url, timeout=5)
+        # Verify connection
+        qdrant_client.get_collections()
+
+        # Share qdrant_client with entry node
+        from app.graph.nodes.entry import set_qdrant_client
+        set_qdrant_client(qdrant_client)
+
+        print(f"{GREEN}✓ Qdrant connected.{RESET}")
+    except Exception as e:
+        print(f"{YELLOW}⚠ Qdrant not available ({e}). Conversation archive disabled.{RESET}")
+        print(f"  {DIM}Run: docker compose up -d{RESET}")
+
     print()
 
-    # Thread pool for background diary tasks
-    diary_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="diary")
+    # Thread pool for background tasks (diary + archive indexing)
+    bg_executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix="bg")
 
-    def _shutdown_diary():
+    def _shutdown_bg():
         print(f"\n{DIM}Waiting for background tasks...{RESET}")
-        diary_executor.shutdown(wait=True)
+        bg_executor.shutdown(wait=True)
 
-    atexit.register(_shutdown_diary)
+    atexit.register(_shutdown_bg)
 
     # Main loop: select character → chat → repeat
     while True:
@@ -340,7 +395,7 @@ def main():
         existing_thread = select_thread(character, mongo_client)
         thread_id = existing_thread or f"{character.name.lower()}-{uuid.uuid4().hex[:8]}"
 
-        result = run_chat(character, checkpointer, thread_id, diary_executor)
+        result = run_chat(character, checkpointer, thread_id, bg_executor, qdrant_client)
 
         if result == "quit":
             break

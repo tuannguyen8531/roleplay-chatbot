@@ -37,7 +37,7 @@ def _get_llm(temperature: float | None = None) -> ChatOllama:
 
 
 def _build_system_prompt(state: RoleplayState) -> str:
-    """Build the full system prompt with character, summary, and facts."""
+    """Build the full system prompt with character, summary, facts, and RAG context."""
     base_prompt = state["character_prompt"]
 
     # Append conversation summary if available
@@ -50,6 +50,15 @@ def _build_system_prompt(state: RoleplayState) -> str:
     if facts:
         facts_str = "\n".join(f"- {f}" for f in facts)
         base_prompt += f"\n\n## Known Facts About This User\n{facts_str}"
+
+    # Append retrieved past conversation context (from RAG)
+    retrieved = state.get("retrieved_context", "")
+    if retrieved:
+        base_prompt += (
+            f"\n\n## Relevant Past Conversations\n"
+            f"The following are past exchanges that may be relevant to the current conversation. "
+            f"Use them to maintain consistency and recall details accurately.\n\n{retrieved}"
+        )
 
     return base_prompt
 

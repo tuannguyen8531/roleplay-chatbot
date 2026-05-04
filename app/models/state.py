@@ -26,5 +26,8 @@ class RoleplayState(MessagesState):
     conversation_summary: str  # Summary of trimmed old messages
     long_term_facts: list[str]  # Facts loaded from DB for this user
 
+    # RAG
+    retrieved_context: str  # Relevant past conversation snippets from Qdrant
+
     # Counters
     turn_count: int  # Track turns for diary trigger
