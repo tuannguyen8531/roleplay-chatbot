@@ -31,3 +31,6 @@ class RoleplayState(MessagesState):
 
     # Counters
     turn_count: int  # Track turns for diary trigger
+
+    # Session
+    thread_id: str  # Conversation thread identifier

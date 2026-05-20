@@ -20,7 +20,6 @@ from pymongo import MongoClient
 from app.config import config
 from app.graph.builder import build_graph
 from app.graph.nodes.diary import diary_node, should_run_diary
-from app.memory.conversation_archive import index_exchange
 from app.models.character import Character, get_character, list_characters
 
 # ── ANSI Colors ──────────────────────────────────────────────────────────────
@@ -245,6 +244,7 @@ def run_chat(
                         "messages": [HumanMessage(content=user_input)],
                         "character_name": character.name,
                         "character_prompt": character.build_system_prompt(),
+                        "thread_id": thread_id,
                     },
                     config=graph_config,
                 )
@@ -255,21 +255,6 @@ def run_chat(
 
             # Background tasks after response is shown
             if bg_executor is not None:
-                # Index the exchange into conversation archive (skip trivial messages)
-                if (
-                    qdrant_client is not None
-                    and len(user_input) >= config.rag_min_message_length
-                    and len(ai_message.content) >= config.rag_min_message_length
-                ):
-                    bg_executor.submit(
-                        _index_exchange_safe,
-                        qdrant_client,
-                        user_input,
-                        ai_message.content,
-                        character.name,
-                        thread_id,
-                    )
-
                 # Trigger diary extraction if due
                 if should_run_diary(result) == "diary":
                     state_snapshot = {
@@ -293,14 +278,6 @@ def _run_diary_safe(state_snapshot: dict):
         diary_node(state_snapshot)
     except Exception:
         logging.getLogger("diary").exception("Background diary extraction failed")
-
-
-def _index_exchange_safe(client, user_msg: str, ai_msg: str, character_name: str, thread_id: str):
-    """Safely index a conversation exchange in background."""
-    try:
-        index_exchange(client, user_msg, ai_msg, character_name, thread_id)
-    except Exception:
-        logging.getLogger("archive").exception("Background archive indexing failed")
 
 
 def main():

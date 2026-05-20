@@ -69,51 +69,11 @@ def _make_point_id(text: str, character: str, thread_id: str = "") -> str:
     return hashlib.md5(content.encode()).hexdigest()
 
 
-def index_exchange(
-    client: QdrantClient,
-    user_message: str,
-    ai_response: str,
-    character_name: str,
-    thread_id: str = "",
-):
-    """
-    Index a single conversation exchange (user + AI) into Qdrant.
-
-    The exchange is stored as a single point with the combined text
-    as the content to embed, and metadata for filtering.
-    """
-    _ensure_collection(client)
-
-    # Combine both sides of the exchange for richer semantic search
-    combined_text = f"User: {user_message}\n{character_name}: {ai_response}"
-    point_id = _make_point_id(combined_text, character_name, thread_id)
-
-    try:
-        embedding = get_embedding(combined_text)
-    except Exception as e:
-        logger.warning("Failed to embed exchange: %s", e)
-        return
-
-    point = PointStruct(
-        id=point_id,
-        vector=embedding,
-        payload={
-            "user_message": user_message,
-            "ai_response": ai_response,
-            "character_name": character_name.lower(),
-            "thread_id": thread_id,
-            "combined_text": combined_text,
-            "indexed_at": datetime.now().isoformat(),
-        },
-    )
-
-    client.upsert(collection_name=COLLECTION_NAME, points=[point])
-
-
 def search_archive(
     client: QdrantClient,
     query: str,
     character_name: str,
+    thread_id: str = "",
     top_k: int = 3,
     score_threshold: float = 0.5,
 ) -> list[dict]:
@@ -124,13 +84,18 @@ def search_archive(
         client: Qdrant client
         query: The user's current message to find relevant past context
         character_name: Filter to same character's conversations
+        thread_id: Optional thread filter to keep conversations isolated
         top_k: Maximum number of results
         score_threshold: Minimum similarity score (0-1, cosine)
 
     Returns:
         List of dicts with 'user_message', 'ai_response', 'score'
     """
-    _ensure_collection(client)
+    try:
+        _ensure_collection(client)
+    except Exception as e:
+        logger.warning("Failed to ensure Qdrant collection: %s", e)
+        return []
 
     try:
         query_embedding = get_embedding(query)
@@ -138,53 +103,124 @@ def search_archive(
         logger.warning("Failed to embed query: %s", e)
         return []
 
-    results = client.query_points(
-        collection_name=COLLECTION_NAME,
-        query=query_embedding,
-        query_filter=Filter(
-            must=[
-                FieldCondition(
-                    key="character_name",
-                    match=MatchValue(value=character_name.lower()),
-                )
-            ]
-        ),
-        limit=top_k,
-        score_threshold=score_threshold,
-    )
-
-    return [
-        {
-            "user_message": point.payload["user_message"],
-            "ai_response": point.payload["ai_response"],
-            "score": point.score,
-        }
-        for point in results.points
+    filters = [
+        FieldCondition(
+            key="character_name",
+            match=MatchValue(value=character_name.lower()),
+        )
     ]
+    if thread_id:
+        filters.append(
+            FieldCondition(
+                key="thread_id",
+                match=MatchValue(value=thread_id),
+            )
+        )
+
+    try:
+        results = client.query_points(
+            collection_name=COLLECTION_NAME,
+            query=query_embedding,
+            query_filter=Filter(must=filters),
+            limit=top_k,
+            score_threshold=score_threshold,
+        )
+    except Exception as e:
+        logger.warning("Failed to search archive: %s", e)
+        return []
+
+    archive_results = []
+    for point in results.points:
+        payload = point.payload or {}
+        if "user_message" in payload and "ai_response" in payload:
+            archive_results.append(
+                {
+                    "user_message": payload["user_message"],
+                    "ai_response": payload["ai_response"],
+                    "score": point.score,
+                }
+            )
+            continue
+
+        for ex in payload.get("exchanges", []):
+            if "user_message" not in ex or "ai_response" not in ex:
+                continue
+            archive_results.append(
+                {
+                    "user_message": ex["user_message"],
+                    "ai_response": ex["ai_response"],
+                    "score": point.score,
+                }
+            )
+
+    return archive_results
 
 
-def index_messages(
+def index_batch(
     client: QdrantClient,
     messages: list,
     character_name: str,
     thread_id: str = "",
 ):
     """
-    Index multiple messages as exchanges (pairs of user + AI).
+    Index a batch of conversation messages as a single Qdrant point.
 
-    Iterates through messages and pairs each human message with
-    the following AI response.
+    Extracts all user+AI exchange pairs from the message list,
+    combines them into one text, embeds once, and stores as one vector.
     """
+    try:
+        _ensure_collection(client)
+    except Exception as e:
+        logger.warning("Failed to ensure Qdrant collection: %s", e)
+        return
+
+    # Extract exchanges
+    exchanges = []
     i = 0
     while i < len(messages) - 1:
         if messages[i].type == "human" and messages[i + 1].type == "ai":
-            index_exchange(
-                client,
-                user_message=messages[i].content,
-                ai_response=messages[i + 1].content,
-                character_name=character_name,
-                thread_id=thread_id,
+            exchanges.append(
+                (messages[i].content, messages[i + 1].content)
             )
             i += 2
         else:
             i += 1
+
+    if not exchanges:
+        return
+
+    # Combine all exchanges into one text
+    combined_parts = []
+    for user_msg, ai_resp in exchanges:
+        combined_parts.append(f"User: {user_msg}\n{character_name}: {ai_resp}")
+    combined_text = "\n---\n".join(combined_parts)
+
+    point_id = _make_point_id(combined_text, character_name, thread_id)
+
+    try:
+        embedding = get_embedding(combined_text)
+    except Exception as e:
+        logger.warning("Failed to embed batch: %s", e)
+        return
+
+    point = PointStruct(
+        id=point_id,
+        vector=embedding,
+        payload={
+            "exchanges": [
+                {"user_message": u, "ai_response": a} for u, a in exchanges
+            ],
+            "character_name": character_name.lower(),
+            "thread_id": thread_id,
+            "combined_text": combined_text,
+            "indexed_at": datetime.now().isoformat(),
+        },
+    )
+
+    try:
+        client.upsert(collection_name=COLLECTION_NAME, points=[point])
+    except Exception as e:
+        logger.warning("Failed to upsert batch: %s", e)
+        return
+
+    logger.info("Indexed batch of %d exchanges into Qdrant", len(exchanges))

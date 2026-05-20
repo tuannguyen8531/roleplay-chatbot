@@ -8,18 +8,22 @@ Responsibilities:
 4. Trim message history to stay within context window
 """
 
+import logging
+import re
+
 from langchain_core.messages import HumanMessage, AIMessage, SystemMessage, RemoveMessage
 from langchain_ollama import ChatOllama
 
 from app.config import config
 from app.models.state import RoleplayState
 from app.memory.facts_store import load_facts
-from app.memory.conversation_archive import search_archive, get_embedding
+from app.memory.conversation_archive import search_archive, get_embedding, index_batch
 from app.logger import log_ai_call
 
 # Module-level clients — set by main.py at startup
 _mongo_client = None
 _qdrant_client = None
+_archive_logger = logging.getLogger("archive")
 
 
 def set_mongo_client(client):
@@ -85,6 +89,18 @@ def _needs_rag_by_embedding(query: str) -> bool:
         return False
     max_sim = max(_cosine_similarity(query_emb, ex) for ex in _recall_embeddings)
     return max_sim > 0.72
+
+
+_RECALL_KEYWORDS = re.compile(
+    r"\b(remember|recall|before|earlier|last time|previous|again|back then|"
+    r"did we|did you|did i|what did|who was|what was|tell me about|remind me)\b",
+    re.IGNORECASE,
+)
+
+
+def _needs_rag_by_keyword(query: str) -> bool:
+    """Fast keyword gate to trigger RAG without embedding cost."""
+    return bool(_RECALL_KEYWORDS.search(query))
 
 
 def _get_summary_llm() -> ChatOllama:
@@ -159,6 +175,31 @@ Rules:
     return summary
 
 
+def _get_trim_cutoff(messages: list, keep_count: int) -> int:
+    """
+    Choose a trim boundary that removes only complete human->AI exchanges.
+
+    Entry runs after the latest human message is appended but before the AI
+    response exists, so a naive "keep last N" can leave history starting with
+    an orphan AI response.
+    """
+    min_cutoff = max(0, len(messages) - keep_count)
+    cutoff = min_cutoff
+
+    while cutoff > 0:
+        prev_type = getattr(messages[cutoff - 1], "type", None)
+        next_type = (
+            getattr(messages[cutoff], "type", None)
+            if cutoff < len(messages)
+            else None
+        )
+        if prev_type == "ai" and next_type == "human":
+            return cutoff
+        cutoff -= 1
+
+    return 0
+
+
 def entry_node(state: RoleplayState) -> dict:
     """
     Prepare context before calling the LLM.
@@ -173,6 +214,7 @@ def entry_node(state: RoleplayState) -> dict:
     max_messages = config.max_history_messages
     current_summary = state.get("conversation_summary", "")
     turn_count = state.get("turn_count", 0)
+    thread_id = state.get("thread_id", "")
 
     # 1. Load long-term facts
     if _mongo_client is not None:
@@ -192,13 +234,20 @@ def entry_node(state: RoleplayState) -> dict:
                 latest_user_msg = msg.content
                 break
 
-        # Use embedding classifier to detect recall intent (semantic, not keyword-based)
-        _load_recall_embeddings()
-        if latest_user_msg and _needs_rag_by_embedding(latest_user_msg):
+        # Hybrid intent detection: keyword gate first, fallback to embedding
+        needs_rag = False
+        if latest_user_msg:
+            needs_rag = _needs_rag_by_keyword(latest_user_msg)
+            if not needs_rag:
+                _load_recall_embeddings()
+                needs_rag = _needs_rag_by_embedding(latest_user_msg)
+
+        if needs_rag:
             results = search_archive(
                 _qdrant_client,
                 query=latest_user_msg,
                 character_name=state["character_name"],
+                thread_id=thread_id,
                 top_k=3,
                 score_threshold=config.rag_score_threshold,
             )
@@ -214,6 +263,7 @@ def entry_node(state: RoleplayState) -> dict:
                 log_ai_call(
                     "rag_search",
                     query=latest_user_msg,
+                    thread_id=thread_id,
                     results_count=len(results),
                     top_score=results[0]["score"],
                 )
@@ -223,20 +273,34 @@ def entry_node(state: RoleplayState) -> dict:
     # 3. Summarize + trim if over threshold
     if len(messages) > max_messages:
         # Keep half the threshold — creates buffer before next trigger
-        keep_count = max_messages // 2
+        keep_count = max(1, max_messages // 2)
 
         # Messages to summarize (the old ones we're about to remove)
-        messages_to_remove = messages[:-keep_count]
+        trim_cutoff = _get_trim_cutoff(messages, keep_count)
+        messages_to_remove = messages[:trim_cutoff]
+
+        # Index batch into Qdrant before removing (one vector for all exchanges)
+        if _qdrant_client is not None and messages_to_remove:
+            try:
+                index_batch(
+                    _qdrant_client,
+                    messages=messages_to_remove,
+                    character_name=state["character_name"],
+                    thread_id=thread_id,
+                )
+            except Exception:
+                _archive_logger.exception("Unexpected archive indexing failure")
 
         # Generate summary from old messages
-        new_summary = _summarize_messages(
-            messages_to_remove, current_summary, state["character_name"]
-        )
-        updates["conversation_summary"] = new_summary
+        if messages_to_remove:
+            new_summary = _summarize_messages(
+                messages_to_remove, current_summary, state["character_name"]
+            )
+            updates["conversation_summary"] = new_summary
 
-        # Use RemoveMessage to explicitly delete old messages from state
-        # (add_messages reducer ignores simple list replacement — must use RemoveMessage)
-        updates["messages"] = [RemoveMessage(id=m.id) for m in messages_to_remove]
+            # Use RemoveMessage to explicitly delete old messages from state
+            # (add_messages reducer ignores simple list replacement — must use RemoveMessage)
+            updates["messages"] = [RemoveMessage(id=m.id) for m in messages_to_remove]
 
     # 4. Increment turn count
     updates["turn_count"] = turn_count + 1
