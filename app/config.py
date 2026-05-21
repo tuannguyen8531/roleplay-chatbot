@@ -17,6 +17,9 @@ load_dotenv(interpolate=True)
 class Config:
     """Application configuration."""
 
+    # General LLM settings
+    llm_provider: str = "ollama"  # "ollama" or "gemini"
+
     # Ollama settings
     ollama_base_url: str = "http://localhost:11434"
     ollama_model: str = "llama3.2:3b"
@@ -25,9 +28,23 @@ class Config:
     ollama_num_ctx: int = 8192  # Context window size
     ollama_embed_model: str = "nomic-embed-text"  # Embedding model for RAG
 
+    # Gemini settings
+    gemini_api_key: str = ""
+    gemini_model: str = "gemini-1.5-flash"
+    gemini_utility_model: str = "gemini-1.5-flash"
+
+    @property
+    def active_model(self) -> str:
+        """Get the configured main model name based on provider."""
+        if self.llm_provider.lower() == "gemini":
+            return self.gemini_model
+        return self.ollama_model
+
     @property
     def utility_model(self) -> str:
         """Model used for summarization and diary (falls back to main model)."""
+        if self.llm_provider.lower() == "gemini":
+            return self.gemini_utility_model or self.gemini_model
         return self.ollama_utility_model or self.ollama_model
 
     # MongoDB settings
@@ -62,6 +79,7 @@ class Config:
     def from_env(cls) -> "Config":
         """Load configuration from environment variables."""
         return cls(
+            llm_provider=os.getenv("LLM_PROVIDER", cls.llm_provider),
             ollama_base_url=os.getenv("OLLAMA_BASE_URL", cls.ollama_base_url),
             ollama_model=os.getenv("OLLAMA_MODEL", cls.ollama_model),
             ollama_utility_model=os.getenv("OLLAMA_UTILITY_MODEL", cls.ollama_utility_model),
@@ -72,6 +90,9 @@ class Config:
                 os.getenv("OLLAMA_NUM_CTX", str(cls.ollama_num_ctx))
             ),
             ollama_embed_model=os.getenv("OLLAMA_EMBED_MODEL", cls.ollama_embed_model),
+            gemini_api_key=os.getenv("GEMINI_API_KEY", cls.gemini_api_key),
+            gemini_model=os.getenv("GEMINI_MODEL", cls.gemini_model),
+            gemini_utility_model=os.getenv("GEMINI_UTILITY_MODEL", cls.gemini_utility_model),
             mongodb_user=os.getenv("MONGODB_USER", cls.mongodb_user),
             mongodb_password=os.getenv("MONGODB_PASSWORD", cls.mongodb_password),
             mongodb_host=os.getenv("MONGODB_HOST", cls.mongodb_host),

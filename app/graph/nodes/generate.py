@@ -8,32 +8,11 @@ This is the core node that:
 """
 
 from langchain_core.messages import SystemMessage
-from langchain_ollama import ChatOllama
-
 from app.config import config
 from app.models.state import RoleplayState
 from app.models.character import get_character
 from app.logger import log_ai_call
-
-import threading
-
-# Thread-local cache: each thread gets its own ChatOllama instance
-_llm_local = threading.local()
-
-
-def _get_llm(temperature: float | None = None) -> ChatOllama:
-    """Get or create the ChatOllama instance for a specific temperature."""
-    t = temperature if temperature is not None else config.ollama_temperature
-    if not hasattr(_llm_local, "llms"):
-        _llm_local.llms = {}
-    if t not in _llm_local.llms:
-        _llm_local.llms[t] = ChatOllama(
-            model=config.ollama_model,
-            base_url=config.ollama_base_url,
-            temperature=t,
-            num_ctx=config.ollama_num_ctx,
-        )
-    return _llm_local.llms[t]
+from app.llm import get_llm
 
 
 def _build_system_prompt(state: RoleplayState) -> str:
@@ -45,10 +24,11 @@ def _build_system_prompt(state: RoleplayState) -> str:
     if summary:
         base_prompt += f"\n\n## Previous Conversation Summary\n{summary}"
 
-    # Append long-term facts if available
+    # Append long-term facts if available (limit to last 15 facts to avoid context bloat)
     facts = state.get("long_term_facts", [])
     if facts:
-        facts_str = "\n".join(f"- {f}" for f in facts)
+        recent_facts = facts[-15:]
+        facts_str = "\n".join(f"- {f}" for f in recent_facts)
         base_prompt += f"\n\n## Known Facts About This User\n{facts_str}"
 
     # Append retrieved past conversation context (from RAG)
@@ -80,7 +60,7 @@ def generate_node(state: RoleplayState) -> dict:
     character = get_character(state["character_name"])
     temp = character.temperature if character else None
 
-    llm = _get_llm(temperature=temp)
+    llm = get_llm(temperature=temp)
 
     # Build enriched system prompt (character + summary + facts)
     system_prompt = _build_system_prompt(state)

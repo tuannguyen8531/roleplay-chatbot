@@ -6,12 +6,12 @@ and extract important facts about the user for cross-session memory.
 """
 
 from langchain_core.messages import HumanMessage
-from langchain_ollama import ChatOllama
 
 from app.config import config
 from app.models.state import RoleplayState
 from app.memory.facts_store import load_facts, save_facts
 from app.logger import log_ai_call
+from app.llm import get_llm
 
 # Module-level mongo_client — set by main.py at startup
 _mongo_client = None
@@ -23,14 +23,12 @@ def set_mongo_client(client):
     _mongo_client = client
 
 
-def _get_extraction_llm() -> ChatOllama:
+def _get_extraction_llm():
     """Get a low-temperature LLM for fact extraction.
     Uses utility_model if configured for faster processing."""
-    return ChatOllama(
-        model=config.utility_model,
-        base_url=config.ollama_base_url,
+    return get_llm(
+        model_name=config.utility_model,
         temperature=0.2,  # Very low for factual extraction
-        num_ctx=config.ollama_num_ctx,
     )
 
 

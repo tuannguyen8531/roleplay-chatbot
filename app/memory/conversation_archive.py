@@ -52,6 +52,25 @@ def get_embedding(text: str) -> list[float]:
     return data["embeddings"][0]
 
 
+def get_embeddings(texts: list[str]) -> list[list[float]]:
+    """
+    Get embedding vectors for a list of texts in a single batch request.
+
+    Uses the configured embed model.
+    """
+    if not texts:
+        return []
+    resp = httpx.post(
+        f"{config.ollama_base_url}/api/embed",
+        json={"model": config.ollama_embed_model, "input": texts},
+        timeout=15,
+    )
+    resp.raise_for_status()
+    data = resp.json()
+    # Ollama returns {"embeddings": [[...vector1...], [...vector2...]]}
+    return data["embeddings"]
+
+
 def _ensure_collection(client: QdrantClient):
     """Create the Qdrant collection if it doesn't exist."""
     collections = [c.name for c in client.get_collections().collections]

@@ -44,24 +44,20 @@ def save_facts(client: MongoClient, facts: list[str], character_name: str, user_
     Save/update long-term facts to MongoDB.
 
     Uses upsert — creates document if it doesn't exist, updates if it does.
-    New facts are merged with existing ones (no duplicates).
+    Uses atomic $addToSet to avoid race conditions between background threads.
     """
     collection = _get_collection(client)
 
-    # Load existing facts to merge
-    existing = load_facts(client, character_name, user_id)
-
-    # Merge: add new facts that don't already exist
-    merged = list(existing)
-    for fact in facts:
-        fact_stripped = fact.strip()
-        if fact_stripped and fact_stripped not in merged:
-            merged.append(fact_stripped)
+    # Filter out empty strings
+    stripped_facts = [f.strip() for f in facts if f.strip()]
+    if not stripped_facts:
+        return []
 
     collection.update_one(
         {"user_id": user_id, "character_name": character_name.lower()},
-        {"$set": {"facts": merged}},
+        {"$addToSet": {"facts": {"$each": stripped_facts}}},
         upsert=True,
     )
 
-    return merged
+    # Return updated list
+    return load_facts(client, character_name, user_id)

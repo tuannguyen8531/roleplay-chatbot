@@ -12,17 +12,18 @@ import logging
 import re
 
 from langchain_core.messages import HumanMessage, AIMessage, SystemMessage, RemoveMessage
-from langchain_ollama import ChatOllama
 
 from app.config import config
 from app.models.state import RoleplayState
 from app.memory.facts_store import load_facts
-from app.memory.conversation_archive import search_archive, get_embedding, index_batch
+from app.memory.conversation_archive import search_archive, get_embedding, index_batch, get_embeddings
 from app.logger import log_ai_call
+from app.llm import get_llm
 
 # Module-level clients — set by main.py at startup
 _mongo_client = None
 _qdrant_client = None
+_bg_executor = None
 _archive_logger = logging.getLogger("archive")
 
 
@@ -36,6 +37,20 @@ def set_qdrant_client(client):
     """Set the Qdrant client for conversation archive search. Called once at startup."""
     global _qdrant_client
     _qdrant_client = client
+
+
+def set_bg_executor(executor):
+    """Set the background thread executor. Called once at startup."""
+    global _bg_executor
+    _bg_executor = executor
+
+
+def _safe_index_batch(client, messages, character_name, thread_id):
+    """Safely index a batch of conversation messages in a background task."""
+    try:
+        index_batch(client, messages, character_name, thread_id)
+    except Exception:
+        _archive_logger.exception("Unexpected background archive indexing failure")
 
 
 # ── Embedding-based RAG Intent Classifier ────────────────────────────────────
@@ -66,7 +81,7 @@ def _load_recall_embeddings():
     if _recall_embeddings is not None:
         return
     try:
-        _recall_embeddings = [get_embedding(ex) for ex in _recall_examples]
+        _recall_embeddings = get_embeddings(_recall_examples)
     except Exception:
         _recall_embeddings = []  # fallback: classifier disabled
 
@@ -103,14 +118,12 @@ def _needs_rag_by_keyword(query: str) -> bool:
     return bool(_RECALL_KEYWORDS.search(query))
 
 
-def _get_summary_llm() -> ChatOllama:
+def _get_summary_llm():
     """Get a low-temperature LLM for summarization (factual, not creative).
     Uses utility_model if configured for faster processing."""
-    return ChatOllama(
-        model=config.utility_model,
-        base_url=config.ollama_base_url,
+    return get_llm(
+        model_name=config.utility_model,
         temperature=0.3,  # Low temp for accurate summarization
-        num_ctx=config.ollama_num_ctx,
     )
 
 
@@ -281,15 +294,16 @@ def entry_node(state: RoleplayState) -> dict:
 
         # Index batch into Qdrant before removing (one vector for all exchanges)
         if _qdrant_client is not None and messages_to_remove:
-            try:
-                index_batch(
+            if _bg_executor is not None:
+                _bg_executor.submit(
+                    _safe_index_batch,
                     _qdrant_client,
-                    messages=messages_to_remove,
-                    character_name=state["character_name"],
-                    thread_id=thread_id,
+                    messages_to_remove,
+                    state["character_name"],
+                    thread_id,
                 )
-            except Exception:
-                _archive_logger.exception("Unexpected archive indexing failure")
+            else:
+                _safe_index_batch(_qdrant_client, messages_to_remove, state["character_name"], thread_id)
 
         # Generate summary from old messages
         if messages_to_remove:

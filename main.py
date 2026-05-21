@@ -7,6 +7,7 @@ Run: uv run python main.py
 
 import atexit
 import logging
+import os
 import sys
 import threading
 import uuid
@@ -284,35 +285,46 @@ def main():
     """Main entry point."""
     print_banner()
 
+    # Check if Gemini is configured
+    if config.llm_provider.lower() == "gemini":
+        print(f"{DIM}Using Gemini provider with model {config.gemini_model}...{RESET}")
+        api_key = config.gemini_api_key or os.getenv("GOOGLE_API_KEY")
+        if not api_key:
+            print(f"{RED}✗ Gemini API key is missing. Set GEMINI_API_KEY in .env or GOOGLE_API_KEY in environment.{RESET}")
+            sys.exit(1)
+        print(f"{GREEN}✓ Gemini configuration checked (API key present).{RESET}")
+
     # Check if Ollama is reachable
     print(f"{DIM}Connecting to Ollama at {config.ollama_base_url}...{RESET}")
+    ollama_ok = False
     try:
         resp = httpx.get(f"{config.ollama_base_url}/api/tags", timeout=5)
         models = [m["name"] for m in resp.json().get("models", [])]
         if models:
             print(f"{GREEN}✓ Ollama connected. Available models: {', '.join(models)}{RESET}")
+            ollama_ok = True
         else:
             print(f"{YELLOW}⚠ Ollama connected but no models found. Run: ollama pull {config.ollama_model}{RESET}")
-            sys.exit(1)
+            if config.llm_provider.lower() == "ollama":
+                sys.exit(1)
 
-        if not any(config.ollama_model in m for m in models):
-            print(f"{YELLOW}⚠ Model '{config.ollama_model}' not found. Run: ollama pull {config.ollama_model}{RESET}")
-            sys.exit(1)
+        if ollama_ok and config.llm_provider.lower() == "ollama":
+            if not any(config.ollama_model in m for m in models):
+                print(f"{YELLOW}⚠ Model '{config.ollama_model}' not found. Run: ollama pull {config.ollama_model}{RESET}")
+                sys.exit(1)
 
         # Also check embedding model
-        if not any(config.ollama_embed_model in m for m in models):
-            print(f"{YELLOW}⚠ Embedding model '{config.ollama_embed_model}' not found. Run: ollama pull {config.ollama_embed_model}{RESET}")
-            print(f"  {DIM}Conversation archive will be disabled until the model is available.{RESET}")
-    except httpx.ConnectError:
-        print(f"{RED}✗ Cannot connect to Ollama. Make sure it's running:{RESET}")
-        print(f"  {DIM}ollama serve{RESET}")
-        sys.exit(1)
-    except httpx.TimeoutException:
-        print(f"{RED}✗ Ollama connection timed out.{RESET}")
-        sys.exit(1)
-    except Exception as e:
-        print(f"{RED}✗ Unexpected error connecting to Ollama: {e}{RESET}")
-        sys.exit(1)
+        if ollama_ok:
+            if not any(config.ollama_embed_model in m for m in models):
+                print(f"{YELLOW}⚠ Embedding model '{config.ollama_embed_model}' not found. Run: ollama pull {config.ollama_embed_model}{RESET}")
+                print(f"  {DIM}Conversation archive will be disabled until the model is available.{RESET}")
+    except (httpx.ConnectError, httpx.TimeoutException, Exception) as e:
+        if config.llm_provider.lower() == "ollama":
+            print(f"{RED}✗ Cannot connect to Ollama ({e}). Make sure it's running:{RESET}")
+            print(f"  {DIM}ollama serve{RESET}")
+            sys.exit(1)
+        else:
+            print(f"{YELLOW}⚠ Ollama not reachable ({e}). Local conversation archive and embedding features disabled.{RESET}")
 
     # Connect to MongoDB
     print(f"{DIM}Connecting to MongoDB...{RESET}")
@@ -356,6 +368,10 @@ def main():
 
     # Thread pool for background tasks (diary + archive indexing)
     bg_executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix="bg")
+
+    # Share bg_executor with entry node
+    from app.graph.nodes.entry import set_bg_executor
+    set_bg_executor(bg_executor)
 
     def _shutdown_bg():
         print(f"\n{DIM}Waiting for background tasks...{RESET}")
