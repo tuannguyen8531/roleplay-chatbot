@@ -124,52 +124,118 @@ def print_character_greeting(character: Character):
     print(f"{DIM}Commands: 'quit' to exit · 'switch' to change character · 'clear' to start new thread{RESET}\n")
 
 
-def select_thread(character: Character, mongo_client: MongoClient) -> str | None:
+def delete_thread(character: Character, mongo_client: MongoClient, thread_id: str, qdrant_client=None):
+    """Delete all checkpoints and vector embeddings associated with a thread_id."""
+    db = mongo_client[config.mongodb_db_name]
+    
+    # 1. Delete from MongoDB
+    checkpoint_del = db["checkpoints"].delete_many({"thread_id": thread_id})
+    writes_del = db["checkpoint_writes"].delete_many({"thread_id": thread_id})
+    blobs_del = db["checkpoint_blobs"].delete_many({"thread_id": thread_id})
+    total_mongo = checkpoint_del.deleted_count + writes_del.deleted_count + blobs_del.deleted_count
+
+    # 2. Delete from Qdrant
+    qdrant_ok = False
+    if qdrant_client is not None:
+        try:
+            from qdrant_client.http import models as qdrant_models
+            from app.memory.conversation_archive import COLLECTION_NAME
+            
+            # Check if collection exists
+            collections = [c.name for c in qdrant_client.get_collections().collections]
+            if COLLECTION_NAME in collections:
+                qdrant_client.delete(
+                    collection_name=COLLECTION_NAME,
+                    points_selector=qdrant_models.FilterSelector(
+                        filter=qdrant_models.Filter(
+                            must=[
+                                qdrant_models.FieldCondition(
+                                    key="thread_id",
+                                    match=qdrant_models.MatchValue(value=thread_id),
+                                )
+                            ]
+                        )
+                    )
+                )
+                qdrant_ok = True
+        except Exception as e:
+            print(f"{YELLOW}⚠ Warning: Failed to delete vectors from Qdrant: {e}{RESET}")
+
+    print(f"\n{GREEN}✓ Deleted session {BOLD}{thread_id}{RESET} ({total_mongo} MongoDB records cleared" + 
+          (f", Qdrant archive cleared" if qdrant_ok else "") + ").")
+
+
+def select_thread(character: Character, mongo_client: MongoClient, qdrant_client=None) -> str | None:
     """
-    Let user choose to resume an existing thread or start a new one.
+    Let user choose to resume an existing thread, start a new one, or delete one.
 
     Returns thread_id string, or None for a new thread.
     """
-    # Query MongoDB for existing threads for this character
     db = mongo_client[config.mongodb_db_name]
     checkpoints = db["checkpoints"]
-
-    # Find distinct thread_ids that match this character
     prefix = character.name.lower()
-    pipeline = [
-        {"$match": {"thread_id": {"$regex": f"^{prefix}-"}}},
-        {"$sort": {"checkpoint_id": -1}},
-        {"$group": {
-            "_id": "$thread_id",
-            "last_update": {"$first": "$checkpoint_id"},
-            "step": {"$first": "$metadata.step"},
-        }},
-        {"$sort": {"last_update": -1}},
-        {"$limit": 10},
-    ]
-    threads = list(checkpoints.aggregate(pipeline))
 
-    if not threads:
-        return None  # No existing threads, start new
-
-    print(f"\n{YELLOW}{BOLD}Existing conversations:{RESET}")
-    print(f"  {CYAN}0.{RESET} {BOLD}New conversation{RESET}")
-    for i, t in enumerate(threads, 1):
-        steps = t.get("step", "?")
-        print(f"  {CYAN}{i}.{RESET} {t['_id']} {DIM}({steps} steps){RESET}")
-
-    print()
     while True:
-        choice = input(f"{YELLOW}Select (0 for new, 1-{len(threads)} to resume): {RESET}").strip()
+        # Find distinct thread_ids that match this character
+        pipeline = [
+            {"$match": {"thread_id": {"$regex": f"^{prefix}-"}}},
+            {"$sort": {"checkpoint_id": -1}},
+            {"$group": {
+                "_id": "$thread_id",
+                "last_update": {"$first": "$checkpoint_id"},
+                "step": {"$first": "$metadata.step"},
+            }},
+            {"$sort": {"last_update": -1}},
+            {"$limit": 10},
+        ]
+        threads = list(checkpoints.aggregate(pipeline))
+
+        if not threads:
+            return None  # No existing threads, start new
+
+        print(f"\n{YELLOW}{BOLD}Existing conversations:{RESET}")
+        print(f"  {CYAN}0.{RESET} {BOLD}New conversation{RESET}")
+        for i, t in enumerate(threads, 1):
+            steps = t.get("step", "?")
+            print(f"  {CYAN}{i}.{RESET} {t['_id']} {DIM}({steps} steps){RESET}")
+
+        print()
+        choice = input(
+            f"{YELLOW}Select (0 for new, 1-{len(threads)} to resume, d<number> to delete, e.g. d1): {RESET}"
+        ).strip()
+
+        if not choice:
+            continue
+
+        # Check if delete command (e.g. d1 or d 1 or del1)
+        is_delete = False
+        idx_str = choice
+        if choice.lower().startswith("d"):
+            is_delete = True
+            if choice.lower().startswith("del"):
+                idx_str = choice[3:].strip()
+            else:
+                idx_str = choice[1:].strip()
+        
         try:
-            idx = int(choice)
-            if idx == 0:
-                return None
-            if 1 <= idx <= len(threads):
-                return threads[idx - 1]["_id"]
+            idx = int(idx_str)
+            if is_delete:
+                if 1 <= idx <= len(threads):
+                    target_thread = threads[idx - 1]["_id"]
+                    delete_thread(character, mongo_client, target_thread, qdrant_client)
+                    # Loop will re-query and re-display updated list
+                    continue
+                else:
+                    print(f"{RED}Invalid thread number to delete.{RESET}")
+            else:
+                if idx == 0:
+                    return None
+                if 1 <= idx <= len(threads):
+                    return threads[idx - 1]["_id"]
         except ValueError:
             pass
-        print(f"{RED}Invalid choice.{RESET}")
+
+        print(f"{RED}Invalid input. Use 0, a number, or d<number> to delete.{RESET}")
 
 
 def run_chat(
@@ -385,7 +451,7 @@ def main():
         print(f"\n{GREEN}✓ Playing as {BOLD}{character.name}{RESET}")
 
         # Let user resume existing thread or start new
-        existing_thread = select_thread(character, mongo_client)
+        existing_thread = select_thread(character, mongo_client, qdrant_client=qdrant_client)
         thread_id = existing_thread or f"{character.name.lower()}-{uuid.uuid4().hex[:8]}"
 
         result = run_chat(character, checkpointer, thread_id, bg_executor, qdrant_client)
