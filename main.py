@@ -21,7 +21,12 @@ from pymongo import MongoClient
 from app.config import config
 from app.graph.builder import build_graph
 from app.graph.nodes.diary import diary_node, should_run_diary
-from app.models.character import Character, get_character, list_characters
+from app.models.character import (
+    Character,
+    get_character,
+    initialize_character_store,
+    list_characters,
+)
 
 # ── ANSI Colors ──────────────────────────────────────────────────────────────
 
@@ -71,17 +76,6 @@ class Spinner:
 
     def __exit__(self, *args):
         self.stop()
-
-
-def print_banner():
-    """Print the startup banner."""
-    print(f"""
-{MAGENTA}{BOLD}╔══════════════════════════════════════════════════════╗
-║           🎭  AI Roleplay Chatbot  🎭                ║
-║       Ollama + LangGraph · Phase 2 (MongoDB)         ║
-╚══════════════════════════════════════════════════════╝{RESET}
-{DIM}Model: {config.ollama_model} · Temp: {config.ollama_temperature} · Ctx: {config.ollama_num_ctx}{RESET}
-""")
 
 
 def select_character() -> Character:
@@ -349,8 +343,6 @@ def _run_diary_safe(state_snapshot: dict):
 
 def main():
     """Main entry point."""
-    print_banner()
-
     # Check if Gemini is configured
     if config.llm_provider.lower() == "gemini":
         print(f"{DIM}Using Gemini provider with model {config.gemini_model}...{RESET}")
@@ -406,7 +398,15 @@ def main():
         entry_set_mongo(mongo_client)
         diary_set_mongo(mongo_client)
 
-        print(f"{GREEN}✓ MongoDB connected. DB: {config.mongodb_db_name}{RESET}")
+        character_count = initialize_character_store(
+            mongo_client,
+            db_name=config.mongodb_db_name,
+        )
+
+        print(
+            f"{GREEN}✓ MongoDB connected. DB: {config.mongodb_db_name} "
+            f"({character_count} characters loaded){RESET}"
+        )
     except Exception as e:
         print(f"{RED}✗ Cannot connect to MongoDB: {e}{RESET}")
         print(f"  {DIM}Run: docker compose up -d{RESET}")
