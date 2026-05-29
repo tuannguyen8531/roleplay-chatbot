@@ -6,8 +6,11 @@ Run: uv run python main.py
 """
 
 import atexit
+import argparse
+from dataclasses import fields
 import logging
 import os
+import re
 import sys
 import threading
 import uuid
@@ -38,6 +41,112 @@ GREEN = "\033[32m"
 YELLOW = "\033[33m"
 MAGENTA = "\033[35m"
 RED = "\033[31m"
+
+
+def parse_args() -> argparse.Namespace:
+    """Parse CLI flags for startup workflow overrides."""
+    parser = argparse.ArgumentParser(
+        description="Local AI-powered roleplay chatbot using Ollama/Gemini + LangGraph.",
+    )
+    parser.add_argument(
+        "-p",
+        "--provider",
+        choices=["ollama", "gemini"],
+        help="Override LLM_PROVIDER from environment.",
+    )
+    parser.add_argument(
+        "-c",
+        "--config",
+        action="store_true",
+        help="Print the effective config and exit.",
+    )
+    parser.add_argument(
+        "-l",
+        "--list",
+        action="store_true",
+        help="List available characters and exit.",
+    )
+
+    session_group = parser.add_mutually_exclusive_group()
+    session_group.add_argument(
+        "-n",
+        "--new",
+        metavar="SLUG",
+        help="Select a character and start a new thread.",
+    )
+    session_group.add_argument(
+        "-r",
+        "--resume",
+        metavar="SLUG",
+        help="Resume the latest thread for a character, or start a new one.",
+    )
+    session_group.add_argument(
+        "-t",
+        "--thread",
+        metavar="ID",
+        help="Resume a specific thread id.",
+    )
+    return parser.parse_args()
+
+
+def apply_cli_overrides(args: argparse.Namespace):
+    """Apply CLI overrides after .env/env loading."""
+    if args.provider:
+        config.llm_provider = args.provider
+
+
+def _display_value(name: str, value) -> str:
+    """Render config values while avoiding printing secrets in full."""
+    if "key" in name.lower() or "password" in name.lower():
+        return "<set>" if value else ""
+    return str(value)
+
+
+def print_effective_config():
+    """Print the current effective config, including derived URLs/models."""
+    print(f"{BOLD}Effective config:{RESET}")
+    for field in fields(config):
+        value = getattr(config, field.name)
+        print(f"{field.name}: {_display_value(field.name, value)}")
+    print(f"active_model: {config.active_model}")
+    print(f"utility_model: {config.utility_model}")
+    print(f"mongodb_uri: mongodb://{config.mongodb_user}:<hidden>@{config.mongodb_host}:{config.mongodb_port}")
+    print(f"qdrant_url: {config.qdrant_url}")
+
+
+def print_character_list():
+    """Print available characters from the active character store."""
+    rows = [
+        (slug, character)
+        for slug in list_characters()
+        if (character := get_character(slug)) is not None
+    ]
+
+    if not rows:
+        print(f"{YELLOW}No characters found.{RESET}")
+        return
+
+    slug_width = max(len("slug"), *(len(slug) for slug, _ in rows))
+    name_width = max(len("name"), *(len(character.name) for _, character in rows))
+
+    print(f"{BOLD}Available characters:{RESET}")
+    print(f"{DIM}{'slug'.ljust(slug_width)}  {'name'.ljust(name_width)}  background{RESET}")
+    print(f"{DIM}{'-' * slug_width}  {'-' * name_width}  {'-' * 48}{RESET}")
+
+    for slug, character in rows:
+        preview = character.background.replace("\n", " ")
+        if len(preview) > 48:
+            preview = f"{preview[:45]}..."
+        print(f"{slug.ljust(slug_width)}  {character.name.ljust(name_width)}  {preview}")
+
+
+def _thread_prefixes(character: Character) -> list[str]:
+    """Return known thread id prefixes for a character."""
+    prefixes = []
+    if character.slug:
+        prefixes.append(character.slug.lower())
+    prefixes.append(character.name.lower())
+    return list(dict.fromkeys(prefixes))
 
 
 class Spinner:
@@ -86,7 +195,10 @@ def select_character() -> Character:
     for i, name in enumerate(characters, 1):
         char = get_character(name)
         if char:
-            print(f"  {CYAN}{i}.{RESET} {BOLD}{char.name}{RESET} — {DIM}{char.persona[:60]}...{RESET}")
+            preview = char.background.replace("\n", " ")
+            if len(preview) > 60:
+                preview = f"{preview[:57]}..."
+            print(f"  {CYAN}{i}.{RESET} {BOLD}{char.name}{RESET} — {DIM}{preview}{RESET}")
 
     print()
     while True:
@@ -116,6 +228,12 @@ def print_character_greeting(character: Character):
     print(f"{GREEN}{BOLD}{character.name}:{RESET} {character.greeting}")
     print(f"{DIM}{'─' * 56}{RESET}")
     print(f"{DIM}Commands: 'quit' to exit · 'switch' to change character · 'clear' to start new thread{RESET}\n")
+
+
+def make_thread_id(character: Character) -> str:
+    """Create a new thread id for a character."""
+    prefix = character.slug or character.name.lower()
+    return f"{prefix}-{uuid.uuid4().hex[:8]}"
 
 
 def delete_thread(character: Character, mongo_client: MongoClient, thread_id: str, qdrant_client=None):
@@ -165,24 +283,9 @@ def select_thread(character: Character, mongo_client: MongoClient, qdrant_client
 
     Returns thread_id string, or None for a new thread.
     """
-    db = mongo_client[config.mongodb_db_name]
-    checkpoints = db["checkpoints"]
-    prefix = character.name.lower()
-
     while True:
         # Find distinct thread_ids that match this character
-        pipeline = [
-            {"$match": {"thread_id": {"$regex": f"^{prefix}-"}}},
-            {"$sort": {"checkpoint_id": -1}},
-            {"$group": {
-                "_id": "$thread_id",
-                "last_update": {"$first": "$checkpoint_id"},
-                "step": {"$first": "$metadata.step"},
-            }},
-            {"$sort": {"last_update": -1}},
-            {"$limit": 10},
-        ]
-        threads = list(checkpoints.aggregate(pipeline))
+        threads = find_recent_threads(character, mongo_client, limit=10)
 
         if not threads:
             return None  # No existing threads, start new
@@ -230,6 +333,46 @@ def select_thread(character: Character, mongo_client: MongoClient, qdrant_client
             pass
 
         print(f"{RED}Invalid input. Use 0, a number, or d<number> to delete.{RESET}")
+
+
+def find_recent_threads(
+    character: Character,
+    mongo_client: MongoClient,
+    limit: int = 10,
+) -> list[dict]:
+    """Find recent checkpoint thread ids for a character."""
+    db = mongo_client[config.mongodb_db_name]
+    checkpoints = db["checkpoints"]
+    prefixes = "|".join(re.escape(prefix) for prefix in _thread_prefixes(character))
+    pipeline = [
+        {"$match": {"thread_id": {"$regex": f"^({prefixes})-"}}},
+        {"$sort": {"checkpoint_id": -1}},
+        {"$group": {
+            "_id": "$thread_id",
+            "last_update": {"$first": "$checkpoint_id"},
+            "step": {"$first": "$metadata.step"},
+        }},
+        {"$sort": {"last_update": -1}},
+        {"$limit": limit},
+    ]
+    return list(checkpoints.aggregate(pipeline))
+
+
+def get_latest_thread(character: Character, mongo_client: MongoClient) -> str | None:
+    """Return the latest thread id for a character if one exists."""
+    threads = find_recent_threads(character, mongo_client, limit=1)
+    return threads[0]["_id"] if threads else None
+
+
+def get_thread_character(thread_id: str, checkpointer: MongoDBSaver) -> Character | None:
+    """Resolve a thread's character from its checkpointed graph state."""
+    graph = build_graph(checkpointer=checkpointer)
+    graph_config = {"configurable": {"thread_id": thread_id}}
+    state = graph.get_state(graph_config)
+    character_name = state.values.get("character_name")
+    if not character_name:
+        return None
+    return get_character(character_name)
 
 
 def run_chat(
@@ -290,7 +433,7 @@ def run_chat(
             return "switch"
         elif user_input.lower() == "clear":
             # Start a new thread (old one remains in MongoDB)
-            thread_id = f"{character.name.lower()}-{uuid.uuid4().hex[:8]}"
+            thread_id = make_thread_id(character)
             graph_config = {"configurable": {"thread_id": thread_id}}
             print(f"{DIM}New conversation started.{RESET}")
             print(f"{DIM}Thread: {thread_id}{RESET}\n")
@@ -341,8 +484,8 @@ def _run_diary_safe(state_snapshot: dict):
         logging.getLogger("diary").exception("Background diary extraction failed")
 
 
-def main():
-    """Main entry point."""
+def validate_llm_provider():
+    """Validate configured LLM provider dependencies."""
     # Check if Gemini is configured
     if config.llm_provider.lower() == "gemini":
         print(f"{DIM}Using Gemini provider with model {config.gemini_model}...{RESET}")
@@ -384,6 +527,9 @@ def main():
         else:
             print(f"{YELLOW}⚠ Ollama not reachable ({e}). Local conversation archive and embedding features disabled.{RESET}")
 
+
+def connect_mongo() -> tuple[MongoClient, MongoDBSaver]:
+    """Connect MongoDB, initialize shared node clients, and load characters."""
     # Connect to MongoDB
     print(f"{DIM}Connecting to MongoDB...{RESET}")
     try:
@@ -407,11 +553,15 @@ def main():
             f"{GREEN}✓ MongoDB connected. DB: {config.mongodb_db_name} "
             f"({character_count} characters loaded){RESET}"
         )
+        return mongo_client, checkpointer
     except Exception as e:
         print(f"{RED}✗ Cannot connect to MongoDB: {e}{RESET}")
         print(f"  {DIM}Run: docker compose up -d{RESET}")
         sys.exit(1)
 
+
+def connect_qdrant():
+    """Connect Qdrant if available and share the client with graph nodes."""
     # Connect to Qdrant
     print(f"{DIM}Connecting to Qdrant at {config.qdrant_url}...{RESET}")
     qdrant_client = None
@@ -430,9 +580,11 @@ def main():
         print(f"{YELLOW}⚠ Qdrant not available ({e}). Conversation archive disabled.{RESET}")
         print(f"  {DIM}Run: docker compose up -d{RESET}")
 
-    print()
+    return qdrant_client
 
-    # Thread pool for background tasks (diary + archive indexing)
+
+def setup_background_executor() -> ThreadPoolExecutor:
+    """Create and register the shared background executor."""
     bg_executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix="bg")
 
     # Share bg_executor with entry node
@@ -444,6 +596,72 @@ def main():
         bg_executor.shutdown(wait=True)
 
     atexit.register(_shutdown_bg)
+    return bg_executor
+
+
+def run_single_cli_session(
+    args: argparse.Namespace,
+    mongo_client: MongoClient,
+    checkpointer: MongoDBSaver,
+    bg_executor: ThreadPoolExecutor,
+    qdrant_client=None,
+):
+    """Run a non-interactive startup selection from --new/--resume/--thread."""
+    if args.thread:
+        character = get_thread_character(args.thread, checkpointer)
+        if character is None:
+            print(f"{RED}Cannot resolve character for thread: {args.thread}{RESET}")
+            sys.exit(1)
+        thread_id = args.thread
+    else:
+        slug = args.new or args.resume
+        character = get_character(slug)
+        if character is None:
+            print(f"{RED}Unknown character: {slug}{RESET}")
+            sys.exit(1)
+
+        if args.new:
+            thread_id = make_thread_id(character)
+        else:
+            thread_id = get_latest_thread(character, mongo_client) or make_thread_id(character)
+
+    print(f"\n{GREEN}✓ Playing as {BOLD}{character.name}{RESET}")
+    run_chat(character, checkpointer, thread_id, bg_executor, qdrant_client)
+
+
+def main():
+    """Main entry point."""
+    args = parse_args()
+    apply_cli_overrides(args)
+
+    if args.config:
+        print_effective_config()
+        return
+
+    if not args.list:
+        validate_llm_provider()
+
+    mongo_client, checkpointer = connect_mongo()
+
+    if args.list:
+        print_character_list()
+        return
+
+    qdrant_client = connect_qdrant()
+
+    print()
+
+    bg_executor = setup_background_executor()
+
+    if args.new or args.resume or args.thread:
+        run_single_cli_session(
+            args,
+            mongo_client,
+            checkpointer,
+            bg_executor,
+            qdrant_client=qdrant_client,
+        )
+        return
 
     # Main loop: select character → chat → repeat
     while True:
@@ -452,7 +670,7 @@ def main():
 
         # Let user resume existing thread or start new
         existing_thread = select_thread(character, mongo_client, qdrant_client=qdrant_client)
-        thread_id = existing_thread or f"{character.name.lower()}-{uuid.uuid4().hex[:8]}"
+        thread_id = existing_thread or make_thread_id(character)
 
         result = run_chat(character, checkpointer, thread_id, bg_executor, qdrant_client)
 
