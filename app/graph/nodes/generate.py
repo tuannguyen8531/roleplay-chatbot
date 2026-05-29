@@ -11,7 +11,7 @@ from langchain_core.messages import SystemMessage
 from app.config import config
 from app.models.state import RoleplayState
 from app.models.character import get_character
-from app.logger import log_ai_call
+from app.logger import log_ai_request, log_ai_response
 from app.llm import get_llm
 
 
@@ -70,7 +70,7 @@ def generate_node(state: RoleplayState) -> dict:
     all_messages = [system_msg] + state["messages"]
 
     # Log the input
-    log_ai_call(
+    call_id = log_ai_request(
         "generate",
         character=state["character_name"],
         system_prompt=system_prompt,
@@ -82,8 +82,9 @@ def generate_node(state: RoleplayState) -> dict:
     response = llm.invoke(all_messages)
 
     # Log the response
-    log_ai_call(
+    log_ai_response(
         "generate",
+        call_id=call_id,
         character=state["character_name"],
         response=response.content,
     )

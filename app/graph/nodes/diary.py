@@ -10,7 +10,7 @@ from langchain_core.messages import HumanMessage
 from app.config import config
 from app.models.state import RoleplayState
 from app.memory.facts_store import load_facts, save_facts
-from app.logger import log_ai_call
+from app.logger import log_ai_request, log_ai_response
 from app.llm import get_llm
 
 # Module-level mongo_client — set by main.py at startup
@@ -106,7 +106,7 @@ Rules:
 
 Respond with only the facts, one per line, no numbering or bullets."""
 
-    log_ai_call(
+    call_id = log_ai_request(
         "diary",
         character=character_name,
         messages_analyzed=len(recent),
@@ -118,7 +118,7 @@ Respond with only the facts, one per line, no numbering or bullets."""
     content = response.content.strip()
 
     if content.upper() == "NONE" or not content:
-        log_ai_call("diary", facts=[])
+        log_ai_response("diary", call_id=call_id, facts=[], raw_response=content)
         return {}
 
     # Parse facts — filter out NONE lines, empty lines, and negative/vague facts
@@ -138,12 +138,14 @@ Respond with only the facts, one per line, no numbering or bullets."""
         new_facts.append(fact)
 
     if not new_facts:
-        log_ai_call("diary", facts=[])
+        log_ai_response("diary", call_id=call_id, facts=[], raw_response=content)
         return {}
 
-    log_ai_call(
+    log_ai_response(
         "diary",
+        call_id=call_id,
         facts=new_facts,
+        raw_response=content,
     )
 
     # Save to MongoDB

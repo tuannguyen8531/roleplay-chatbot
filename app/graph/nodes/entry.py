@@ -17,7 +17,7 @@ from app.config import config
 from app.models.state import RoleplayState
 from app.memory.facts_store import load_facts
 from app.memory.conversation_archive import search_archive, get_embedding, index_batch, get_embeddings
-from app.logger import log_ai_call
+from app.logger import log_ai_call, log_ai_request, log_ai_response
 from app.llm import get_llm
 
 # Module-level clients — set by main.py at startup
@@ -170,7 +170,7 @@ Rules:
 - Keep track of user's in-character name if revealed
 - No preamble, just the summary"""
 
-    log_ai_call(
+    call_id = log_ai_request(
         "summarize",
         existing_summary=existing_summary,
         messages_to_summarize=len(messages),
@@ -180,8 +180,9 @@ Rules:
     response = llm.invoke([HumanMessage(content=prompt)])
     summary = response.content.strip()
 
-    log_ai_call(
+    log_ai_response(
         "summarize",
+        call_id=call_id,
         summary=summary,
     )
 
