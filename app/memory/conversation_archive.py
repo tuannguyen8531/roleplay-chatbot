@@ -20,11 +20,13 @@ from qdrant_client.http.models import (
     PointStruct,
     VectorParams,
     Filter,
+    Condition,
     FieldCondition,
     MatchValue,
 )
 
 from app.config import config
+from app.messages import message_content_to_text
 
 logger = logging.getLogger("archive")
 
@@ -122,7 +124,7 @@ def search_archive(
         logger.warning("Failed to embed query: %s", e)
         return []
 
-    filters = [
+    filters: list[Condition] = [
         FieldCondition(
             key="character_name",
             match=MatchValue(value=character_name.lower()),
@@ -199,7 +201,10 @@ def index_batch(
     while i < len(messages) - 1:
         if messages[i].type == "human" and messages[i + 1].type == "ai":
             exchanges.append(
-                (messages[i].content, messages[i + 1].content)
+                (
+                    message_content_to_text(messages[i].content),
+                    message_content_to_text(messages[i + 1].content),
+                )
             )
             i += 2
         else:

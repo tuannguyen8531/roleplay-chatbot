@@ -12,13 +12,16 @@ so it doesn't block the user response.
 
 from langgraph.checkpoint.base import BaseCheckpointSaver
 from langgraph.graph import END, START, StateGraph
+from langgraph.graph.state import CompiledStateGraph
 
 from app.graph.nodes.entry import entry_node
 from app.graph.nodes.generate import generate_node
 from app.models.state import RoleplayState
 
 
-def build_graph(checkpointer: BaseCheckpointSaver | None = None) -> StateGraph:
+def build_graph(
+    checkpointer: BaseCheckpointSaver | None = None,
+) -> CompiledStateGraph[RoleplayState, None, RoleplayState, RoleplayState]:
     """
     Build and compile the roleplay chatbot graph.
 

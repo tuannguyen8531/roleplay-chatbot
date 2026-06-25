@@ -20,6 +20,10 @@ class Config:
     # General LLM settings
     llm_provider: str = "ollama"  # "ollama" or "gemini"
 
+    # API settings
+    api_host: str = "127.0.0.1"
+    api_port: int = 8000
+
     # Ollama settings
     ollama_base_url: str = "http://localhost:11434"
     ollama_model: str = "llama3.2:3b"
@@ -80,6 +84,8 @@ class Config:
         """Load configuration from environment variables."""
         return cls(
             llm_provider=os.getenv("LLM_PROVIDER", cls.llm_provider),
+            api_host=os.getenv("API_HOST", cls.api_host),
+            api_port=int(os.getenv("API_PORT", str(cls.api_port))),
             ollama_base_url=os.getenv("OLLAMA_BASE_URL", cls.ollama_base_url),
             ollama_model=os.getenv("OLLAMA_MODEL", cls.ollama_model),
             ollama_utility_model=os.getenv("OLLAMA_UTILITY_MODEL", cls.ollama_utility_model),

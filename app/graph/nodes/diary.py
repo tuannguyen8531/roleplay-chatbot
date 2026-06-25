@@ -12,6 +12,7 @@ from app.models.state import RoleplayState
 from app.memory.facts_store import load_facts, save_facts
 from app.logger import log_ai_request, log_ai_response
 from app.llm import get_llm
+from app.messages import message_content_to_text
 
 # Module-level mongo_client — set by main.py at startup
 _mongo_client = None
@@ -78,7 +79,7 @@ def diary_node(state: RoleplayState) -> dict:
     conversation_text = ""
     for msg in recent:
         role = "User" if msg.type == "human" else character_name
-        conversation_text += f"{role}: {msg.content}\n"
+        conversation_text += f"{role}: {message_content_to_text(msg.content)}\n"
 
     # Extract facts with improved prompt + few-shot examples
     prompt = f"""Extract NEW important facts from this roleplay conversation. Focus on the User (the human player), not {character_name}.
@@ -115,7 +116,7 @@ Respond with only the facts, one per line, no numbering or bullets."""
     )
 
     response = llm.invoke([HumanMessage(content=prompt)])
-    content = response.content.strip()
+    content = message_content_to_text(response.content).strip()
 
     if content.upper() == "NONE" or not content:
         log_ai_response("diary", call_id=call_id, facts=[], raw_response=content)

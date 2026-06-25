@@ -13,6 +13,7 @@ The app is currently a terminal CLI. It persists conversation state in MongoDB, 
 - Long-term user facts stored in MongoDB.
 - Conversation archive and semantic recall through Qdrant.
 - Supports Ollama and Gemini providers.
+- FastAPI MVP for character/thread/message workflows.
 - Separate request/response logs with matching `call_id` values.
 
 ## Requirements
@@ -35,6 +36,9 @@ Create a `.env` file:
 
 ```env
 LLM_PROVIDER=ollama
+
+API_HOST=127.0.0.1
+API_PORT=8000
 
 OLLAMA_BASE_URL=http://localhost:11434
 OLLAMA_MODEL=llama3.2:3b
@@ -82,43 +86,61 @@ ollama pull nomic-embed-text
 Start the interactive CLI:
 
 ```bash
-uv run python main.py
+uv run cli
 ```
 
 List characters:
 
 ```bash
-uv run python main.py --list
+uv run cli --list
 ```
 
 Start a new thread with a character:
 
 ```bash
-uv run python main.py --new aria
+uv run cli --new aria
 ```
 
 Resume the latest thread for a character:
 
 ```bash
-uv run python main.py --resume aria
+uv run cli --resume aria
 ```
 
 Resume a specific thread:
 
 ```bash
-uv run python main.py --thread aria-1234abcd
+uv run cli --thread aria-1234abcd
 ```
 
 Override the provider for one run:
 
 ```bash
-uv run python main.py --provider gemini --new aria
+uv run cli --provider gemini --new aria
 ```
 
 Print the effective config:
 
 ```bash
-uv run python main.py --config
+uv run cli --config
+```
+
+Start the API server:
+
+```bash
+uv run api
+```
+
+Open API docs:
+
+```text
+http://localhost:8000/docs
+```
+
+For development reload:
+
+```bash
+uv run uvicorn app.api.app:app --host 127.0.0.1 --port 8000 --reload
 ```
 
 ## CLI Flags
@@ -143,6 +165,60 @@ quit    Exit the app
 switch  Return to character selection
 clear   Start a new thread for the current character
 ```
+
+## API MVP
+
+The API is turn-based. The server does not hold a chat loop; each message request processes one user turn and returns one AI response.
+
+```text
+GET    /health
+GET    /config
+POST   /chat
+GET    /characters
+GET    /characters/{slug}
+
+POST   /threads
+GET    /threads
+GET    /threads/{thread_id}
+DELETE /threads/{thread_id}
+
+POST   /threads/{thread_id}/messages
+GET    /threads/{thread_id}/messages
+```
+
+Send a chat message directly:
+
+```bash
+curl -X POST http://localhost:8000/chat \
+  -H 'Content-Type: application/json' \
+  -d '{"character":"aria","message":"Hello"}'
+```
+
+If `thread_id` is omitted, `/chat` creates a new thread. If `thread_id` is provided, the API verifies that the thread belongs to the requested character.
+
+```bash
+curl -X POST http://localhost:8000/chat \
+  -H 'Content-Type: application/json' \
+  -d '{"character":"aria","thread_id":"aria-1234abcd","message":"Continue."}'
+```
+
+Create a thread:
+
+```bash
+curl -X POST http://localhost:8000/threads \
+  -H 'Content-Type: application/json' \
+  -d '{"character_slug":"aria"}'
+```
+
+Send a message:
+
+```bash
+curl -X POST http://localhost:8000/threads/aria-1234abcd/messages \
+  -H 'Content-Type: application/json' \
+  -d '{"message":"Do you remember what happened last time?"}'
+```
+
+Provider selection is server-side only for the MVP. Set `LLM_PROVIDER` in `.env`; API clients cannot switch providers per request.
 
 ## Character Storage
 
@@ -173,7 +249,6 @@ Typical character document:
   "version": 1
 }
 ```
-```
 
 ## Project Structure
 
@@ -181,9 +256,13 @@ Typical character document:
 main.py                         CLI entrypoint
 characters.json                 Default character seed data
 docker-compose.yml              MongoDB and Qdrant services
+app/api/app.py                  FastAPI application and endpoints
+app/api/__main__.py             API server entrypoint using API_HOST/API_PORT
+app/api/schemas.py              API request/response schemas
 app/config.py                   Environment-based configuration
 app/llm.py                      LLM provider factory
 app/logger.py                   Request/response logging
+app/runtime.py                  Shared CLI/API runtime helpers
 app/models/character.py         Character model and MongoDB store init
 app/models/state.py             LangGraph state schema
 app/graph/builder.py            LangGraph assembly
@@ -199,4 +278,4 @@ app/memory/conversation_archive.py  Qdrant archive and retrieval
 - MongoDB is required for normal CLI startup.
 - Qdrant is optional at runtime; if unavailable, conversation archive recall is disabled.
 - For Gemini provider, local Ollama embedding/archive features may be unavailable unless Ollama is also running.
-- This project is currently prepared for an API direction, but no FastAPI app has been added yet.
+- API endpoints currently cover the MVP only: health, config, character reads, thread metadata, messages, and thread delete.

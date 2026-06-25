@@ -13,6 +13,7 @@ from app.models.state import RoleplayState
 from app.models.character import get_character
 from app.logger import log_ai_request, log_ai_response
 from app.llm import get_llm
+from app.messages import message_content_to_text
 
 
 def _build_system_prompt(state: RoleplayState) -> str:
@@ -75,7 +76,10 @@ def generate_node(state: RoleplayState) -> dict:
         character=state["character_name"],
         system_prompt=system_prompt,
         messages_count=len(state["messages"]),
-        messages=[{"role": m.type, "content": m.content} for m in state["messages"]],
+        messages=[
+            {"role": m.type, "content": message_content_to_text(m.content)}
+            for m in state["messages"]
+        ],
     )
 
     # Call Ollama
@@ -86,7 +90,7 @@ def generate_node(state: RoleplayState) -> dict:
         "generate",
         call_id=call_id,
         character=state["character_name"],
-        response=response.content,
+        response=message_content_to_text(response.content),
     )
 
     return {"messages": [response]}

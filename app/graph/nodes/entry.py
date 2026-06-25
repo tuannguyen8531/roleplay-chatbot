@@ -11,7 +11,7 @@ Responsibilities:
 import logging
 import re
 
-from langchain_core.messages import HumanMessage, AIMessage, SystemMessage, RemoveMessage
+from langchain_core.messages import HumanMessage, RemoveMessage
 
 from app.config import config
 from app.models.state import RoleplayState
@@ -19,6 +19,7 @@ from app.memory.facts_store import load_facts
 from app.memory.conversation_archive import search_archive, get_embedding, index_batch, get_embeddings
 from app.logger import log_ai_call, log_ai_request, log_ai_response
 from app.llm import get_llm
+from app.messages import message_content_to_text
 
 # Module-level clients — set by main.py at startup
 _mongo_client = None
@@ -140,7 +141,7 @@ def _summarize_messages(messages: list, existing_summary: str, character_name: s
     conversation_text = ""
     for msg in messages:
         role = "User" if msg.type == "human" else character_name
-        conversation_text += f"{role}: {msg.content}\n"
+        conversation_text += f"{role}: {message_content_to_text(msg.content)}\n"
 
     # Build summarization prompt
     if existing_summary:
@@ -178,7 +179,7 @@ Rules:
     )
 
     response = llm.invoke([HumanMessage(content=prompt)])
-    summary = response.content.strip()
+    summary = message_content_to_text(response.content).strip()
 
     log_ai_response(
         "summarize",
@@ -245,7 +246,7 @@ def entry_node(state: RoleplayState) -> dict:
         latest_user_msg = None
         for msg in reversed(messages):
             if msg.type == "human":
-                latest_user_msg = msg.content
+                latest_user_msg = message_content_to_text(msg.content)
                 break
 
         # Hybrid intent detection: keyword gate first, fallback to embedding
@@ -256,7 +257,7 @@ def entry_node(state: RoleplayState) -> dict:
                 _load_recall_embeddings()
                 needs_rag = _needs_rag_by_embedding(latest_user_msg)
 
-        if needs_rag:
+        if needs_rag and latest_user_msg is not None:
             results = search_archive(
                 _qdrant_client,
                 query=latest_user_msg,
@@ -315,7 +316,11 @@ def entry_node(state: RoleplayState) -> dict:
 
             # Use RemoveMessage to explicitly delete old messages from state
             # (add_messages reducer ignores simple list replacement — must use RemoveMessage)
-            updates["messages"] = [RemoveMessage(id=m.id) for m in messages_to_remove]
+            updates["messages"] = [
+                RemoveMessage(id=message_id)
+                for m in messages_to_remove
+                if (message_id := m.id) is not None
+            ]
 
     # 4. Increment turn count
     updates["turn_count"] = turn_count + 1

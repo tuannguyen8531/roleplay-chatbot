@@ -15,21 +15,25 @@ import sys
 import threading
 import uuid
 from concurrent.futures import ThreadPoolExecutor
+from typing import cast
 
 import httpx
 from langchain_core.messages import HumanMessage
+from langchain_core.runnables import RunnableConfig
 from langgraph.checkpoint.mongodb import MongoDBSaver
 from pymongo import MongoClient
 
 from app.config import config
 from app.graph.builder import build_graph
 from app.graph.nodes.diary import diary_node, should_run_diary
+from app.messages import message_content_to_text
 from app.models.character import (
     Character,
     get_character,
     initialize_character_store,
     list_characters,
 )
+from app.models.state import RoleplayState
 
 # ── ANSI Colors ──────────────────────────────────────────────────────────────
 
@@ -256,17 +260,16 @@ def delete_thread(character: Character, mongo_client: MongoClient, thread_id: st
             # Check if collection exists
             collections = [c.name for c in qdrant_client.get_collections().collections]
             if COLLECTION_NAME in collections:
+                filters: list[qdrant_models.Condition] = [
+                    qdrant_models.FieldCondition(
+                        key="thread_id",
+                        match=qdrant_models.MatchValue(value=thread_id),
+                    )
+                ]
                 qdrant_client.delete(
                     collection_name=COLLECTION_NAME,
                     points_selector=qdrant_models.FilterSelector(
-                        filter=qdrant_models.Filter(
-                            must=[
-                                qdrant_models.FieldCondition(
-                                    key="thread_id",
-                                    match=qdrant_models.MatchValue(value=thread_id),
-                                )
-                            ]
-                        )
+                        filter=qdrant_models.Filter(must=filters)
                     )
                 )
                 qdrant_ok = True
@@ -367,7 +370,7 @@ def get_latest_thread(character: Character, mongo_client: MongoClient) -> str | 
 def get_thread_character(thread_id: str, checkpointer: MongoDBSaver) -> Character | None:
     """Resolve a thread's character from its checkpointed graph state."""
     graph = build_graph(checkpointer=checkpointer)
-    graph_config = {"configurable": {"thread_id": thread_id}}
+    graph_config = cast(RunnableConfig, {"configurable": {"thread_id": thread_id}})
     state = graph.get_state(graph_config)
     character_name = state.values.get("character_name")
     if not character_name:
@@ -390,7 +393,7 @@ def run_chat(
     # Build the graph with checkpointer
     graph = build_graph(checkpointer=checkpointer)
 
-    graph_config = {"configurable": {"thread_id": thread_id}}
+    graph_config = cast(RunnableConfig, {"configurable": {"thread_id": thread_id}})
 
     # Check if resuming — load existing state
     existing_state = graph.get_state(graph_config)
@@ -404,10 +407,11 @@ def run_chat(
         recent = messages[-4:]  # last 2 exchanges
         for msg in recent:
             role = msg.type
+            content = message_content_to_text(msg.content)
             if role == "human":
-                print(f"  {CYAN}You:{RESET} {msg.content[:80]}{'...' if len(msg.content) > 80 else ''}")
+                print(f"  {CYAN}You:{RESET} {content[:80]}{'...' if len(content) > 80 else ''}")
             else:
-                print(f"  {GREEN}{character.name}:{RESET} {msg.content[:80]}{'...' if len(msg.content) > 80 else ''}")
+                print(f"  {GREEN}{character.name}:{RESET} {content[:80]}{'...' if len(content) > 80 else ''}")
         print(f"{DIM}{'─' * 56}{RESET}\n")
     else:
         print_character_greeting(character)
@@ -434,7 +438,7 @@ def run_chat(
         elif user_input.lower() == "clear":
             # Start a new thread (old one remains in MongoDB)
             thread_id = make_thread_id(character)
-            graph_config = {"configurable": {"thread_id": thread_id}}
+            graph_config = cast(RunnableConfig, {"configurable": {"thread_id": thread_id}})
             print(f"{DIM}New conversation started.{RESET}")
             print(f"{DIM}Thread: {thread_id}{RESET}\n")
             print_character_greeting(character)
@@ -443,30 +447,40 @@ def run_chat(
         # Invoke the graph with spinner
         try:
             with Spinner(f"{character.name} is thinking"):
-                result = graph.invoke(
+                graph_input = cast(
+                    RoleplayState,
                     {
                         "messages": [HumanMessage(content=user_input)],
                         "character_name": character.name,
                         "character_prompt": character.build_system_prompt(),
                         "thread_id": thread_id,
                     },
-                    config=graph_config,
+                )
+                result = cast(
+                    RoleplayState,
+                    graph.invoke(
+                        graph_input,
+                        config=graph_config,
+                    ),
                 )
 
             # Extract AI response from result
             ai_message = result["messages"][-1]
-            print(f"{GREEN}{BOLD}{character.name}:{RESET} {ai_message.content}")
+            print(f"{GREEN}{BOLD}{character.name}:{RESET} {message_content_to_text(ai_message.content)}")
 
             # Background tasks after response is shown
             if bg_executor is not None:
                 # Trigger diary extraction if due
                 if should_run_diary(result) == "diary":
-                    state_snapshot = {
-                        "messages": list(result.get("messages", [])),
-                        "character_name": result.get("character_name", ""),
-                        "long_term_facts": list(result.get("long_term_facts", [])),
-                        "turn_count": result.get("turn_count", 0),
-                    }
+                    state_snapshot = cast(
+                        RoleplayState,
+                        {
+                            "messages": list(result.get("messages", [])),
+                            "character_name": result.get("character_name", ""),
+                            "long_term_facts": list(result.get("long_term_facts", [])),
+                            "turn_count": result.get("turn_count", 0),
+                        },
+                    )
                     bg_executor.submit(_run_diary_safe, state_snapshot)
 
         except Exception as e:
@@ -476,7 +490,7 @@ def run_chat(
         print()
 
 
-def _run_diary_safe(state_snapshot: dict):
+def _run_diary_safe(state_snapshot: RoleplayState):
     """Safely run diary extraction in a background thread."""
     try:
         diary_node(state_snapshot)

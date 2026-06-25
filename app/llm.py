@@ -10,25 +10,13 @@ from abc import ABC, abstractmethod
 from langchain_core.language_models.chat_models import BaseChatModel
 from langchain_ollama import ChatOllama
 from langchain_google_genai import ChatGoogleGenerativeAI
+from pydantic import SecretStr
 
 from app.config import config
+from app.messages import message_content_to_text
 
 # Thread-local cache: each thread gets its own LLM instances per provider/model/temperature
 _llm_local = threading.local()
-
-
-def _clean_content(content) -> str:
-    """Helper to extract clean text from list content (like Gemini thinking blocks)."""
-    if isinstance(content, list):
-        text_parts = []
-        for block in content:
-            if isinstance(block, dict):
-                if block.get("type") == "text":
-                    text_parts.append(block.get("text", ""))
-            elif isinstance(block, str):
-                text_parts.append(block)
-        return "".join(text_parts)
-    return str(content)
 
 
 class CleanChatOllama(ChatOllama):
@@ -37,7 +25,7 @@ class CleanChatOllama(ChatOllama):
     def invoke(self, *args, **kwargs):
         res = super().invoke(*args, **kwargs)
         if hasattr(res, "content"):
-            res.content = _clean_content(res.content)
+            res.content = message_content_to_text(res.content)
         return res
 
 
@@ -47,7 +35,7 @@ class CleanChatGoogleGenerativeAI(ChatGoogleGenerativeAI):
     def invoke(self, *args, **kwargs):
         res = super().invoke(*args, **kwargs)
         if hasattr(res, "content"):
-            res.content = _clean_content(res.content)
+            res.content = message_content_to_text(res.content)
         return res
 
 
@@ -91,7 +79,7 @@ class GeminiLLMProvider(BaseLLMProvider):
             )
         return CleanChatGoogleGenerativeAI(
             model=model_name,
-            google_api_key=self.api_key,
+            api_key=SecretStr(self.api_key),
             temperature=temperature,
         )
 
