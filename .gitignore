@@ -13,5 +13,6 @@ wheels/
 .env
 
 # Runtime data
+.database/
 data/
 logs/

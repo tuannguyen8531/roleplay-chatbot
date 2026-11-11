@@ -10,8 +10,8 @@ services:
       MONGO_INITDB_ROOT_USERNAME: ${MONGODB_USER}
       MONGO_INITDB_ROOT_PASSWORD: ${MONGODB_PASSWORD}
     volumes:
-      - mongo_data:/data/db
-      - mongo_config:/data/configdb
+      - ./.database/mongo/db:/data/db
+      - ./.database/mongo/configdb:/data/configdb
     networks:
       - chatbot
 
@@ -23,14 +23,9 @@ services:
       - "${QDRANT_PORT:-6333}:6333"
       - "${QDRANT_GRPC_PORT:-6334}:6334"
     volumes:
-      - qdrant_data:/qdrant/storage
+      - ./.database/qdrant:/qdrant/storage
     networks:
       - chatbot
-
-volumes:
-  mongo_data:
-  mongo_config:
-  qdrant_data:
 
 networks:
   chatbot:
